@@ -1,0 +1,12 @@
+{
+  "threshold": {
+    "blockOn": "Critical",
+    "warnOn": "High"
+  },
+  "excludePaths": [
+    "src/engine/local/rules.ts",
+    "test-fixtures/**",
+    "**/__tests__/**",
+    "src/prompts/security-agent-prompts.ts"
+  ]
+}

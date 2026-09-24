@@ -172,11 +172,26 @@ describe('renderConfigProblems', () => {
     expect(output).toContain('/repo/.codeguardrc.json');
     expect(output).toContain('- threshold.blockOn: must be one of ...');
     expect(output).toContain('- is not valid JSON');
+    expect(output).toContain('2 problems');
   });
 
   it('copes with no known config path', () => {
     expect(renderConfigProblems([{ where: '', message: 'bad' }], null)).toContain(
-      'problem in configuration',
+      '1 problem in the configuration',
     );
+  });
+
+  it('shouts in plain text, because a hook runs with colour off', () => {
+    // The whole point of the marker: inside a pre-commit hook stdout is not a
+    // TTY, so colour is disabled and a colour-only warning would read as prose.
+    const output = renderConfigProblems([{ where: '', message: 'bad' }], null);
+    expect(output).not.toContain(ESCAPE);
+    expect(output).toContain('[CONFIG ERROR]');
+  });
+
+  it('states that the settings were ignored and names the check command', () => {
+    const output = renderConfigProblems([{ where: '', message: 'bad' }], null);
+    expect(output).toContain('continued with its defaults');
+    expect(output).toContain('codeguard config --validate');
   });
 });

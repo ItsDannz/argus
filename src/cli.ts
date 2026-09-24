@@ -164,10 +164,38 @@ program
 
 program
   .command('config')
-  .description(`Show, or initialise, CodeGuard configuration (${CONFIG_FILENAME})`)
+  .description(`Show, validate, or initialise CodeGuard configuration (${CONFIG_FILENAME})`)
   .option('--init', `write a starter ${CONFIG_FILENAME} with the defaults`)
-  .action(async (options: { init?: boolean }) => {
+  .option('--validate', `check ${CONFIG_FILENAME} and exit non-zero when it is malformed`)
+  .action(async (options: { init?: boolean; validate?: boolean }) => {
     const repoRoot = await resolveRepoRoot(process.cwd());
+
+    /**
+     * Proactive check, so a typo is found here rather than mid-commit. The
+     * pre-commit hook deliberately does NOT block on a broken config (see the
+     * failure policy in hooks/pre-commit.ts), which makes a way to ask "is my
+     * config actually being read?" worth having.
+     *
+     * Exit 1 rather than 3: a malformed config is an operational problem, not a
+     * security finding, and conflating the two would let a CI job treat a typo
+     * as a vulnerability.
+     */
+    if (options.validate === true) {
+      const checked = await loadConfig(repoRoot);
+      if (checked.problems.length === 0) {
+        process.stdout.write(
+          checked.path === null
+            ? `CodeGuard: no ${CONFIG_FILENAME} found — running on built-in defaults.\n`
+            : `CodeGuard: ${displayPath(repoRoot, checked.path)} is valid.\n`,
+        );
+        return;
+      }
+      process.stderr.write(
+        `${renderConfigProblems(checked.problems, checked.path, { useColor: colorEnabled(undefined) })}\n`,
+      );
+      process.exitCode = EXIT.ERROR;
+      return;
+    }
 
     if (options.init === true) {
       const target = path.join(repoRoot, CONFIG_FILENAME);

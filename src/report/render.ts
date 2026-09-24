@@ -204,6 +204,16 @@ export function renderVerdict(
  * Goes to stderr, and is deliberately verbose: this is printed on every single
  * commit until the file is fixed, which is what stops a broken config from
  * quietly becoming a config nobody notices is being ignored.
+ *
+ * The `[CONFIG ERROR]` marker is PLAIN TEXT, not colour, on purpose. Colour is
+ * off whenever stdout is not a terminal — which is exactly the case inside a
+ * pre-commit hook — so a warning signalled only by colour would arrive at the
+ * developer as ordinary prose. The marker has to survive `--no-color`.
+ *
+ * The trailing lines state the policy and name the fix. A developer whose
+ * commit just succeeded over a broken config needs to know two things: that the
+ * settings were ignored (so a stricter-than-default threshold did not apply),
+ * and how to check the file without waiting for the next commit.
  */
 export function renderConfigProblems(
   problems: readonly ConfigProblem[],
@@ -216,9 +226,13 @@ export function renderConfigProblems(
   const lines = problems.map((problem) =>
     problem.where === '' ? `  - ${problem.message}` : `  - ${problem.where}: ${problem.message}`,
   );
+  const where = configPath ?? 'the configuration';
+  const headline = `CodeGuard found ${plural(problems.length, 'problem')} in ${where}`;
 
   return [
-    paint(`CodeGuard: problem in ${configPath ?? 'configuration'}`, ANSI.yellow),
+    `${paint('[CONFIG ERROR]', ANSI.yellow)} ${paint(headline, ANSI.bold)}`,
     ...lines,
+    '  These settings were ignored — CodeGuard continued with its defaults.',
+    '  Check this file with:  codeguard config --validate',
   ].join('\n');
 }

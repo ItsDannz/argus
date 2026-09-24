@@ -1,0 +1,39 @@
+#!/usr/bin/env sh
+# codeguard:pre-commit-hook v1
+#
+# Installed by `codeguard install`, which is safe to re-run.
+#
+# Runs `codeguard scan --staged` against the staged diff and refuses the
+# commit when a finding is at or above the configured block threshold (FR-9).
+#
+# This hook fails OPEN and shouts: it refuses a commit only for a real finding.
+# Anything else — the CLI missing, a broken config, an internal error — warns on
+# stderr and allows the commit. A gate that blocks on its own bugs gets bypassed
+# permanently with --no-verify, and then protects nothing.
+#
+# Environment:
+#   CODEGUARD_BIN   executable to run, when codeguard is neither on PATH nor
+#                   installed under ./node_modules/.bin
+#
+# Escape hatch: git commit --no-verify
+
+# --- codeguard ----------------------------------------------------------
+# Git runs hooks with the working directory at the repository root, so the
+# relative paths below resolve correctly.
+CODEGUARD="${CODEGUARD_BIN:-}"
+if [ -z "$CODEGUARD" ]; then
+  if [ -x "./node_modules/.bin/codeguard" ]; then
+    CODEGUARD="./node_modules/.bin/codeguard"
+  else
+    CODEGUARD="codeguard"
+  fi
+fi
+
+if [ ! -x "$CODEGUARD" ] && ! command -v "$CODEGUARD" >/dev/null 2>&1; then
+  echo "CodeGuard: executable not found (tried CODEGUARD_BIN, ./node_modules/.bin/codeguard, and codeguard on PATH)." >&2
+  echo "CodeGuard: the commit is ALLOWED, but NO security check ran." >&2
+  echo "CodeGuard: install it, or set CODEGUARD_BIN to its path." >&2
+  exit 0
+fi
+
+exec "$CODEGUARD" scan --staged

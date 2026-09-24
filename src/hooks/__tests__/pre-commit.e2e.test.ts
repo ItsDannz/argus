@@ -322,6 +322,9 @@ maybe('pre-commit hook, end to end', () => {
 
     expect(result.output).toContain('threshold.blockOn');
     expect(result.output).toContain('must be one of');
+    // The marker must survive with colour off, which is the case here: a hook's
+    // stdout is not a terminal.
+    expect(result.output).toContain('[CONFIG ERROR]');
     expect(result.code).not.toBe(0);
     expect(result.output).toContain('Commit blocked');
   });
@@ -390,5 +393,59 @@ maybe('pre-commit hook, end to end', () => {
     const commit = await repo.commit('seeded via husky');
     expect(commit.code).not.toBe(0);
     expect(commit.output).toContain('Commit blocked');
+  });
+});
+
+/**
+ * `config --validate` exists because the hook deliberately does NOT block on a
+ * broken config. That trade-off is safe only if there is a way to ask "is my
+ * config actually being read?" without waiting for a commit — these are that
+ * contract.
+ */
+maybe('config --validate, end to end', () => {
+  const validate = (dir: string): Promise<RunResult> =>
+    run(dir, 'node', [CLI_PATH, 'config', '--validate']);
+
+  it('exits 0 when there is no config file, and says defaults are in use', async () => {
+    const repo = await setupRepo();
+    const result = await validate(repo.dir);
+    expect(result.code).toBe(0);
+    expect(result.output).toContain('no .codeguardrc.json found');
+  });
+
+  it('exits 0 and confirms a valid config', async () => {
+    const repo = await setupRepo();
+    await writeFile(
+      path.join(repo.dir, CONFIG_FILENAME),
+      JSON.stringify({ threshold: { blockOn: 'High' }, excludePaths: ['dist/**'] }),
+      'utf8',
+    );
+    const result = await validate(repo.dir);
+    expect(result.code).toBe(0);
+    expect(result.output).toContain('is valid');
+  });
+
+  it('exits 1 — not 3 — for a malformed config, and shouts in plain text', async () => {
+    // Exit 3 means "a security finding blocked this". A config typo is not a
+    // security finding, and a CI job must not be able to confuse the two.
+    const repo = await setupRepo();
+    await writeFile(path.join(repo.dir, CONFIG_FILENAME), '{ "threshold": ', 'utf8');
+    const result = await validate(repo.dir);
+    expect(result.code).toBe(1);
+    expect(result.output).toContain('[CONFIG ERROR]');
+    expect(result.output).toContain('is not valid JSON');
+  });
+
+  it('reports an unknown key, because a typo must not look like a working setting', async () => {
+    const repo = await setupRepo();
+    await writeFile(
+      path.join(repo.dir, CONFIG_FILENAME),
+      JSON.stringify({ excludePath: ['dist/**'] }),
+      'utf8',
+    );
+    const result = await validate(repo.dir);
+    expect(result.code).toBe(1);
+    expect(result.output).toContain('excludePath');
+    expect(result.output).toContain('unknown setting');
   });
 });
