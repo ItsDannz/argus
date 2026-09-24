@@ -1,4 +1,4 @@
-// Fixture: raw and concatenated SQL. Two lines here should be flagged, and the
+// Fixture: raw and concatenated SQL. Three lines here should be flagged, and the
 // parameterised query at the bottom must NOT be.
 const express = require('express');
 const db = require('./db');
@@ -16,6 +16,18 @@ router.get('/user', (req, res) => {
 router.get('/orders', (req, res) => {
   const status = req.query.status;
   const sql = `SELECT * FROM orders WHERE status = '${status}'`;
+  db.query(sql, (err, rows) => res.json(rows));
+});
+
+// Vulnerable: concatenation around a QUOTED value.
+//
+// This route is the one that matters most, because it is the shape that
+// dominates real code — every text comparison puts an apostrophe inside the
+// string, and the quotes are what made it invisible. The two above are
+// quote-free, which is why they kept passing while this one went unreported.
+router.get('/search', (req, res) => {
+  const name = req.query.name;
+  const sql = "SELECT id, email FROM users WHERE name = '" + name + "'";
   db.query(sql, (err, rows) => res.json(rows));
 });
 

@@ -134,12 +134,17 @@ function resolveIo(io: ScanIo): { write: (text: string) => void; writeError: (te
  * out to Git.
  *
  * ─── Mode selection, and the one fallback that exists ────────────────────────
- * `decideMode` chooses the engine (FR-3). There are exactly two ways Remote Mode
- * ends up not being used:
+ * `decideMode` chooses the engine (FR-3). There are exactly three ways Remote
+ * Mode ends up not being used:
  *
  *   - `--remote` with no key. An ERROR, not a fallback. The developer asked for
  *     an AI scan; quietly giving them a regex scan while the flag implied
  *     otherwise is a lie about what ran.
+ *   - `remote.hookMode: "local-only"`. Not a fallback either — a decision the
+ *     repository made in advance, and the only one of the three that is not the
+ *     result of something going wrong. Nothing is attempted, so nothing is
+ *     reported: the developer configured this and does not need to be told on
+ *     every commit. `codeguard config` states it on demand.
  *   - A keyless default, or a configured key that fails at runtime. A fallback,
  *     with a loud warning, because the alternative is blocking a commit over a
  *     network blip (PRD §6.3, §8).
@@ -163,6 +168,7 @@ export async function scanDiff(options: ScanDiffOptions): Promise<ScanResult> {
     ...(options.remote === undefined ? {} : { remote: options.remote }),
     environment,
     ...(loaded.config.model === undefined ? {} : { configModel: loaded.config.model }),
+    hookMode: loaded.config.remote.hookMode,
   });
 
   if (mode.kind === 'error') {

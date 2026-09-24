@@ -22,7 +22,7 @@ import { Command } from 'commander';
 
 import { CONFIG_FILENAME, cloneConfig, DEFAULT_CONFIG } from './config/schema';
 import { loadConfig } from './config/load';
-import { decideMode, loadEnvironment } from './engine/mode';
+import { decideMode, loadEnvironment, type LocalSource } from './engine/mode';
 import { EXIT } from './exit-codes';
 import { findRepoRoot } from './git/repo';
 import { installPreCommitHook, runPreCommitCheck, scanDiff } from './hooks/pre-commit';
@@ -65,6 +65,21 @@ async function readStdin(): Promise<string> {
 async function resolveRepoRoot(cwd: string): Promise<string> {
   return (await findRepoRoot(cwd)) ?? cwd;
 }
+
+/**
+ * Why an automatic scan landed on Local Mode.
+ *
+ * "local rule engine", without a cause, is the same four words in three
+ * different situations — a flag the developer typed, a key that is not there,
+ * and a config setting they may have inherited from a clone. Two of those are
+ * actionable and all three are invisible, so the cause is printed with the
+ * outcome.
+ */
+const LOCAL_MODE_NOTE: Record<LocalSource, string> = {
+  flag: 'local rule engine (forced by --local)',
+  'no-key': 'local rule engine (no API key found)',
+  config: 'local rule engine (forced by remote.hookMode = "local-only")',
+};
 
 /**
  * Repo-relative path with forward slashes, for display.
@@ -222,17 +237,21 @@ program
     const mode = decideMode({
       environment,
       ...(loaded.config.model === undefined ? {} : { configModel: loaded.config.model }),
+      hookMode: loaded.config.remote.hookMode,
     });
 
     // The mode is reported rather than left to be inferred from whether an API
     // key happens to be exported. "Why did my commit just make a network call?"
-    // is a question this line answers before it is asked.
+    // is a question this line answers before it is asked — and its inverse,
+    // "why is it NOT using the key I just set?", is the question that follows a
+    // `remote.hookMode` setting nobody in this checkout remembers agreeing to.
+    // Hence naming the cause rather than just the outcome.
     const modeLine =
       mode.kind === 'remote'
         ? `remote AI (${mode.credentials.model})`
-        : mode.kind === 'local'
-          ? 'local rule engine'
-          : 'error — see below';
+        : mode.kind === 'error'
+          ? 'error — see below'
+          : LOCAL_MODE_NOTE[mode.source];
 
     const lines = [
       'CodeGuard configuration',
@@ -241,6 +260,7 @@ program
       `  warn on        ${loaded.config.threshold.warnOn}`,
       `  exclude paths  ${loaded.config.excludePaths.length > 0 ? loaded.config.excludePaths.join(', ') : 'none'}`,
       `  model          ${loaded.config.model ?? 'the built-in default'}`,
+      `  hook mode      ${loaded.config.remote.hookMode}`,
       `  mode           ${modeLine}`,
       `  deep hunks     up to ${loaded.config.remote.maxDeepAnalysisHunks} per scan`,
     ];

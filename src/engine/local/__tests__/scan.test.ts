@@ -4,11 +4,12 @@ import { runLocalScan, type Rule } from '../index';
 import { diffForFixture, fixtureLines, newFileDiff, readFixture } from './helpers';
 
 describe('runLocalScan against fixtures', () => {
-  it('flags exactly the two concatenated queries in the SQL fixture', async () => {
+  it('flags exactly the three vulnerable queries in the SQL fixture', async () => {
     const content = readFixture('sql-injection.js');
     const findings = await runLocalScan(diffForFixture('sql-injection.js', 'server/routes/users.js'));
 
     expect(findings.map((finding) => finding.ruleId).sort()).toEqual([
+      'sql-string-concatenation',
       'sql-string-concatenation',
       'sql-template-interpolation',
     ]);
@@ -16,11 +17,15 @@ describe('runLocalScan against fixtures', () => {
     // The reported line numbers must point at the vulnerable lines themselves,
     // not merely be plausible numbers.
     const lines = fixtureLines(content);
-    const concatenated = findings.find((f) => f.ruleId === 'sql-string-concatenation')!;
+    const concatenated = findings.filter((f) => f.ruleId === 'sql-string-concatenation');
     const interpolated = findings.find((f) => f.ruleId === 'sql-template-interpolation')!;
 
-    expect(lines[concatenated.line - 1]).toContain('+ userId');
+    expect(lines[concatenated[0]!.line - 1]).toContain('+ userId');
     expect(lines[interpolated.line - 1]).toContain('${status}');
+    // The regression case, asserted at the fixture level too: a concatenated
+    // value that is QUOTED. This line was in no fixture until the character
+    // class that could not see it was fixed.
+    expect(lines[concatenated[1]!.line - 1]).toContain(`'" + name + "'`);
     expect(findings.every((finding) => finding.file === 'server/routes/users.js')).toBe(true);
   });
 

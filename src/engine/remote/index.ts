@@ -47,7 +47,6 @@ import {
   PATCH_SYSTEM_PROMPT,
   SCAN_SYSTEM_PROMPT,
 } from '../../prompts/security-agent-prompts';
-import type { RemoteConfig } from '../../config/schema';
 import type { Finding } from '../findings';
 import { filterExcludedFiles, truncateToBudget } from './budget';
 import { createDeepSeekClient, type LlmClient } from './client';
@@ -96,12 +95,26 @@ export interface RemoteScanOutcome {
   requestCount: number;
 }
 
+/**
+ * The two knobs this pipeline actually reads.
+ *
+ * Deliberately narrower than the `remote` block in the config file. `hookMode`
+ * lives in that block too, but it decides WHICH ENGINE RUNS — a question already
+ * settled by the time this code is reached. Accepting the whole block would let
+ * the pipeline believe it has a say in that decision, and the first reader to
+ * see the field here would reasonably conclude it does.
+ */
+export interface RemoteBudget {
+  maxDeepAnalysisHunks: number;
+  timeoutMs: number;
+}
+
 export interface RemoteScanOptions {
   /** Raw staged diff, unredacted. Redaction happens inside, always. */
   diff: string;
   /** `baseUrl` is set only when `CODEGUARD_BASE_URL` overrides the endpoint. */
   credentials: { apiKey: string; model: string; baseUrl?: string };
-  remote: RemoteConfig;
+  remote: RemoteBudget;
   /** `excludePaths` from the config; excluded files are never transmitted. */
   exclude?: (filePath: string) => boolean;
   /** Injectable for tests. Defaults to the live DeepSeek client. */

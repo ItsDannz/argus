@@ -326,8 +326,14 @@ export function renderVerdict(
  *
  * The trailing lines state the policy and name the fix. A developer whose
  * commit just succeeded over a broken config needs to know two things: that the
- * settings were ignored (so a stricter-than-default threshold did not apply),
- * and how to check the file without waiting for the next commit.
+ * run carried on without their settings (so a stricter-than-default threshold
+ * did not apply), and how to check the file without waiting for the next commit.
+ *
+ * The footer deliberately does NOT say "we used the defaults". Almost every
+ * problem does fall back to a default — but `remote.hookMode` does not, and
+ * cannot, because its default is the permissive one. A blanket sentence that is
+ * wrong for one value in a list is worse than a vaguer sentence that is true for
+ * all of them, and each problem line already names what was used instead.
  */
 export function renderConfigProblems(
   problems: readonly ConfigProblem[],
@@ -346,7 +352,7 @@ export function renderConfigProblems(
   return [
     `${paint('[CONFIG ERROR]', ANSI.yellow)} ${paint(headline, ANSI.bold)}`,
     ...lines,
-    '  These settings were ignored — CodeGuard continued with its defaults.',
+    '  CodeGuard did not stop for this — it carried on with the values named above.',
     '  Check this file with:  codeguard config --validate',
   ].join('\n');
 }

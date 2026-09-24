@@ -218,6 +218,35 @@ const COMMAND_INJECTION_RULES: Rule[] = [
 /** SQL verbs whose presence marks a string as a query rather than prose. */
 const SQL_VERB = String.raw`(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|REPLACE\s+INTO|DROP\s+(?:TABLE|DATABASE)|ALTER\s+TABLE|TRUNCATE\s+TABLE|UNION\s+SELECT|CREATE\s+TABLE)`;
 
+/**
+ * A SQL verb inside one complete quoted string literal.
+ *
+ * Written as two alternatives that each exclude ONE quote character, rather
+ * than the obvious `(['"])[^'"]*\b${SQL_VERB}\b[^'"]*\1`. That version reads as
+ * "a quoted string containing SQL" and is what this rule said for two phases.
+ * It is not what it said to the regex engine: a character class excluding both
+ * quote characters describes a literal containing neither, and that is the one
+ * shape real code almost never uses.
+ *
+ *     const sql = "SELECT * FROM users WHERE name = '" + name + "'";
+ *
+ * The apostrophe is inside a double-quoted string, so it is legal JavaScript and
+ * is present in essentially every SQL predicate that compares a text column. The
+ * old class stopped dead at it, the closing quote was never reached, and the
+ * rule silently missed the injection — while reporting nothing, which is the
+ * failure mode that matters. A detector that finds nothing and a detector that
+ * is not looking are indistinguishable from the outside.
+ *
+ * Matching each quote to its OWN kind is what makes a literal a literal, and it
+ * is also what lets the other quote character appear inside without ending the
+ * match. That is the whole fix, applied once here rather than four times.
+ *
+ * Every rule below that quotes a SQL string uses this, so the class can only be
+ * wrong in one place. `sql-template-interpolation` is deliberately not a user:
+ * backticks are their own delimiter, and neither quote character can end them.
+ */
+const SQL_IN_QUOTED_STRING = String.raw`(?:"[^"]*\b${SQL_VERB}\b[^"]*"|'[^']*\b${SQL_VERB}\b[^']*')`;
+
 const SQL_REMEDIATION =
   'Use a parameterised query / prepared statement so user input is bound as a parameter and can never be parsed as SQL.';
 
@@ -227,8 +256,8 @@ const SQL_RULES: Rule[] = [
     category: 'sql_injection',
     severity: 'Critical',
     message: `SQL assembled with string concatenation. ${SQL_REMEDIATION}`,
-    // A quoted string containing a SQL verb, immediately followed by "+".
-    pattern: new RegExp(String.raw`(['"])[^'"]*\b${SQL_VERB}\b[^'"]*\1\s*\+`, 'i'),
+    // A complete quoted string containing a SQL verb, immediately followed by "+".
+    pattern: new RegExp(String.raw`${SQL_IN_QUOTED_STRING}\s*\+`, 'i'),
   },
   {
     id: 'sql-template-interpolation',
@@ -243,7 +272,12 @@ const SQL_RULES: Rule[] = [
     category: 'sql_injection',
     severity: 'Critical',
     message: `SQL built by Python f-string interpolation. ${SQL_REMEDIATION}`,
-    pattern: new RegExp(String.raw`\bf['"][^'"]*\b${SQL_VERB}\b[^'"]*\{`, 'i'),
+    // The literal is left open on purpose: `{` is what ends the vulnerable part,
+    // and an f-string with a substitution in it is unlikely to be malformed.
+    pattern: new RegExp(
+      String.raw`\bf(?:"[^"]*\b${SQL_VERB}\b[^"]*\{|'[^']*\b${SQL_VERB}\b[^']*\{)`,
+      'i',
+    ),
   },
   {
     id: 'sql-percent-format',
@@ -251,14 +285,14 @@ const SQL_RULES: Rule[] = [
     severity: 'Critical',
     message: `SQL built with Python %-formatting. ${SQL_REMEDIATION}`,
     // "SELECT ... %s" % value   |   "SELECT ... %(name)s" % params
-    pattern: new RegExp(String.raw`(['"])[^'"]*\b${SQL_VERB}\b[^'"]*\1\s*%\s*(?:\(|[A-Za-z_])`, 'i'),
+    pattern: new RegExp(String.raw`${SQL_IN_QUOTED_STRING}\s*%\s*(?:\(|[A-Za-z_])`, 'i'),
   },
   {
     id: 'sql-str-format',
     category: 'sql_injection',
     severity: 'Critical',
     message: `SQL built with str.format(). ${SQL_REMEDIATION}`,
-    pattern: new RegExp(String.raw`(['"])[^'"]*\b${SQL_VERB}\b[^'"]*\1\s*\.\s*format\s*\(`, 'i'),
+    pattern: new RegExp(String.raw`${SQL_IN_QUOTED_STRING}\s*\.\s*format\s*\(`, 'i'),
   },
 ];
 

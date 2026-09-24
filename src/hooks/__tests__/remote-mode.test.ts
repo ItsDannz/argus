@@ -27,12 +27,13 @@ const REPO_ROOT = '/nowhere/scratch-repo';
 /**
  * A SQL injection the LOCAL rules also detect, so a fallback is observable.
  *
- * The shape is load-bearing. `sql-string-concatenation` matches a quoted string
- * containing a SQL verb immediately followed by `+`, and its character class
- * excludes both quote types — so the more natural `"...name = '" + name + "'"`
- * does NOT match, because the embedded apostrophe ends the class early. That is
- * a pre-existing gap in the Phase 2 rule, reported rather than papered over
- * here; this fixture uses the shape the rule does cover.
+ * The quotation inside the string is deliberate. This fixture used to avoid it
+ * because `sql-string-concatenation` could not match a query containing an
+ * apostrophe — the rule's character class excluded both quote characters, so
+ * the string looked unterminated and the injection went unreported. That gap is
+ * fixed, and this fixture now uses the shape real code uses rather than the one
+ * the rule happened to accept. If it ever stops being detected, the fallback
+ * test below fails, which is the point.
  */
 const SQLI_DIFF = [
   'diff --git a/src/db.js b/src/db.js',
@@ -42,7 +43,7 @@ const SQLI_DIFF = [
   '+++ b/src/db.js',
   '@@ -0,0 +1,3 @@',
   '+function findUser(db, name) {',
-  '+  const sql = "SELECT * FROM users WHERE name = " + name;',
+  `+  const sql = "SELECT * FROM users WHERE name = '" + name + "'";`,
   '+  return db.query(sql);',
   '+}',
   '',

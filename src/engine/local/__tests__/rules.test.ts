@@ -24,6 +24,46 @@ describe('rule detection — true positives', () => {
       expected: ['sql-string-concatenation'],
     },
     {
+      // REGRESSION. This is the shape the rule silently missed: the apostrophe
+      // is INSIDE a double-quoted string, which is legal JavaScript and present
+      // in every SQL predicate comparing a text column. The old `[^'"]*` class
+      // excluded both quote characters, so the string looked unterminated, the
+      // rule matched nothing, and nothing reported that it had matched nothing.
+      // Asserted with the realistic shape on purpose — the fixture that used a
+      // quote-free string passed throughout, which is exactly why the gap
+      // survived two phases.
+      name: 'SQL concatenation around a quoted value — the shape real code uses',
+      path: 'src/db.js',
+      code: `const sql = "SELECT * FROM users WHERE name = '" + name + "'";`,
+      expected: ['sql-string-concatenation'],
+    },
+    {
+      name: 'the same, mirrored: single quotes around a double-quoted value',
+      path: 'src/db.js',
+      code: `const sql = 'SELECT * FROM users WHERE name = "' + name + '"';`,
+      expected: ['sql-string-concatenation'],
+    },
+    {
+      // The identical character class was in three other rules. Fixing one and
+      // leaving the rest would have been a half-fix that looked complete.
+      name: 'SQL %-formatting around a quoted value (Python)',
+      path: 'app/db.py',
+      code: `query = "SELECT * FROM users WHERE name = '%s'" % name`,
+      expected: ['sql-percent-format'],
+    },
+    {
+      name: 'SQL str.format() around a quoted value (Python)',
+      path: 'app/db.py',
+      code: `query = "SELECT * FROM users WHERE name = '{}'".format(name)`,
+      expected: ['sql-str-format'],
+    },
+    {
+      name: 'SQL f-string interpolation around a quoted value (Python)',
+      path: 'app/db.py',
+      code: `query = f"SELECT * FROM users WHERE name = '{name}'"`,
+      expected: ['sql-fstring-interpolation'],
+    },
+    {
       name: 'SQL by template-literal interpolation (JS)',
       path: 'src/db.js',
       code: "const sql = `SELECT * FROM orders WHERE status = '${status}'`;",
@@ -227,6 +267,20 @@ describe('rule detection — false positives must not fire', () => {
       name: 'a SQL statement with no concatenation',
       path: 'db/schema.sql',
       code: 'SELECT id FROM users WHERE id = 1;',
+    },
+    {
+      // Guards the fix in the other direction. The widened quote handling must
+      // not turn "a quoted string that happens to contain a verb" into a match
+      // on its own — the concatenation operator is still what makes it a
+      // finding, and this line does not have one.
+      name: 'a parameterised query whose placeholder sits in a quoted value',
+      path: 'src/db.js',
+      code: `db.query("SELECT id FROM users WHERE name = ?", [name]);`,
+    },
+    {
+      name: 'a parameterised query with a quoted literal and no operator',
+      path: 'app/db.py',
+      code: `cur.execute("SELECT * FROM users WHERE name = %s", (name,))`,
     },
     {
       name: 'a template literal with no SQL in it',

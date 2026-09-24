@@ -20,17 +20,57 @@ describe('validateConfig', () => {
     const { config, problems } = validateConfig({
       threshold: { blockOn: 'High', warnOn: 'Medium' },
       excludePaths: ['dist/**'],
+      remote: { maxDeepAnalysisHunks: 2, timeoutMs: 5_000, hookMode: 'local-only' },
       model: 'deepseek-v4.1-flash',
     });
     expect(problems).toEqual([]);
     expect(config).toEqual({
       threshold: { blockOn: 'High', warnOn: 'Medium' },
       excludePaths: ['dist/**'],
-      // Absent from the file, so filled from the defaults — a config written
-      // before `remote` existed still has to produce the full shape.
-      remote: { maxDeepAnalysisHunks: 5, timeoutMs: 60_000 },
+      remote: { maxDeepAnalysisHunks: 2, timeoutMs: 5_000, hookMode: 'local-only' },
       model: 'deepseek-v4.1-flash',
     });
+  });
+
+  it('fills the remote block from the defaults when the file omits it', () => {
+    // A config written before `remote` existed still has to produce the full
+    // shape — `hookMode` included, and not as `undefined`. The mode decision
+    // tests `=== 'local-only'`, which is false for `undefined`, so a missing
+    // field would quietly read as "auto" and nobody would ever see it fail.
+    const { config, problems } = validateConfig({ excludePaths: ['dist/**'] });
+
+    expect(problems).toEqual([]);
+    expect(config.remote).toEqual({ maxDeepAnalysisHunks: 5, timeoutMs: 60_000, hookMode: 'auto' });
+  });
+
+  it('accepts both hookMode values', () => {
+    expect(validateConfig({ remote: { hookMode: 'auto' } }).config.remote.hookMode).toBe('auto');
+    expect(validateConfig({ remote: { hookMode: 'local-only' } }).config.remote.hookMode).toBe(
+      'local-only',
+    );
+  });
+
+  it('falls back to local-only, NOT to auto, when hookMode is misspelled', () => {
+    // The one invalid value in this file that does not fall back to its own
+    // default, and the asymmetry is the point. Somebody writing "local_only" is
+    // trying to stop their commits reaching a provider. Answering "auto" would
+    // give them exactly the behaviour they were switching off, with a warning
+    // banner as the only thing between their code and the network; answering
+    // "local-only" guesses wrong in the direction that transmits nothing. Those
+    // two mistakes are not equally bad, so they must not share a fallback.
+    const { config, problems } = validateConfig({ remote: { hookMode: 'local_only' } });
+
+    expect(problems).toHaveLength(1);
+    expect(problems[0]?.where).toBe('remote.hookMode');
+    expect(problems[0]?.message).toContain('"local-only"');
+    expect(config.remote.hookMode).toBe('local-only');
+  });
+
+  it('rejects a non-string hookMode the same way', () => {
+    const { config, problems } = validateConfig({ remote: { hookMode: true } });
+
+    expect(problems[0]?.where).toBe('remote.hookMode');
+    expect(config.remote.hookMode).toBe('local-only');
   });
 
   it('fills in each threshold independently, so a partial object still works', () => {
@@ -97,7 +137,7 @@ describe('cloneConfig', () => {
     const source: CodeGuardConfig = {
       threshold: { blockOn: 'High', warnOn: 'Medium' },
       excludePaths: ['dist/**'],
-      remote: { maxDeepAnalysisHunks: 3, timeoutMs: 1_000 },
+      remote: { maxDeepAnalysisHunks: 3, timeoutMs: 1_000, hookMode: 'local-only' },
       model: 'm',
     };
     const copy = cloneConfig(source);
@@ -112,7 +152,7 @@ describe('cloneConfig', () => {
     const copy = cloneConfig({
       threshold: { blockOn: 'Critical', warnOn: 'High' },
       excludePaths: [],
-      remote: { maxDeepAnalysisHunks: 5, timeoutMs: 60_000 },
+      remote: { maxDeepAnalysisHunks: 5, timeoutMs: 60_000, hookMode: 'auto' },
     });
 
     expect('model' in copy).toBe(false);

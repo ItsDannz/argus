@@ -23,6 +23,7 @@ import path from 'node:path';
 
 import { parse as parseDotEnv } from 'dotenv';
 
+import type { HookMode } from '../config/schema';
 import { DEFAULT_MODEL } from './remote/client';
 
 /** Environment variable holding the key. Named in docs and errors, never its value. */
@@ -105,8 +106,20 @@ export interface RemoteCredentials {
   baseUrl?: string;
 }
 
+/**
+ * Why Local Mode was chosen.
+ *
+ * Carried alongside the reason string because the string is written for a human
+ * and programs should not have to read prose to find out what happened.
+ * `codeguard config` is the caller that needs it: "local rule engine" is the
+ * same four words whether the developer passed `--local`, has no key, or set
+ * `remote.hookMode`, and those are three quite different situations — in one of
+ * them the AI engine is available and deliberately unused.
+ */
+export type LocalSource = 'flag' | 'no-key' | 'config';
+
 export type ModeDecision =
-  | { kind: 'local'; reason: string }
+  | { kind: 'local'; reason: string; source: LocalSource }
   | { kind: 'remote'; reason: string; credentials: RemoteCredentials }
   /**
    * The user asked for something that cannot be honoured — currently only
@@ -124,10 +137,34 @@ export interface ModeOptions {
   environment: Environment;
   /** `model` from `.codeguardrc.json`, if set. */
   configModel?: string;
+  /**
+   * `remote.hookMode` from `.codeguardrc.json`. Defaults to `"auto"`.
+   *
+   * Governs AUTOMATIC selection only. It is applied after the `--remote` branch
+   * below, so an explicit flag always wins — a config file cannot veto a request
+   * the user just typed.
+   */
+  hookMode?: HookMode;
 }
 
 /**
  * Decides which engine runs.
+ *
+ * Precedence, strongest first:
+ *
+ *   1. `--local` and `--remote` together — an error, not a choice.
+ *   2. `--local`                    — honoured even when a key is present.
+ *   3. `--remote`                   — an error without a key, never a fallback.
+ *   4. no key                       — Local.
+ *   5. `remote.hookMode: "local-only"` — Local, key or no key.
+ *   6. otherwise                    — Remote.
+ *
+ * Steps 5 and 6 are the only ones a config file can move, and they are
+ * deliberately below the flags: configuration decides what happens by DEFAULT,
+ * and the command line decides what happens NOW. Reversing that would let a
+ * repository's committed config silently override a developer who typed
+ * `--remote`, which is the wrong way round for a setting whose whole purpose is
+ * to be an escape hatch.
  *
  * Precedence for the model id: `CODEGUARD_MODEL` > config `model` > built-in
  * default. The environment variable is deliberately strongest — it is the escape
@@ -154,7 +191,7 @@ export function decideMode(options: ModeOptions): ModeDecision {
   }
 
   if (options.local === true) {
-    return { kind: 'local', reason: 'Local Mode forced by --local.' };
+    return { kind: 'local', source: 'flag', reason: 'Local Mode forced by --local.' };
   }
 
   if (options.remote === true) {
@@ -176,7 +213,25 @@ export function decideMode(options: ModeOptions): ModeDecision {
   if (apiKey === null) {
     return {
       kind: 'local',
+      source: 'no-key',
       reason: `${API_KEY_VAR} is not set, so Local Mode is the default (PRD §6.3).`,
+    };
+  }
+
+  // Checked after the keyless branch so the reason names the real cause: a
+  // developer with no key and hookMode "local-only" is in Local Mode for the
+  // ordinary reason, and telling them their config did it would send them
+  // looking for a setting that is not the one in the way.
+  //
+  // Note what this does NOT do: there is no fallback here, because there is
+  // nothing to fall back FROM. Nothing was attempted and nothing failed.
+  if (options.hookMode === 'local-only') {
+    return {
+      kind: 'local',
+      source: 'config',
+      reason:
+        `remote.hookMode is "local-only", so the automatic scan uses Local Mode even though ` +
+        `${API_KEY_VAR} is set. Run \`codeguard scan --remote\` for an AI scan.`,
     };
   }
 

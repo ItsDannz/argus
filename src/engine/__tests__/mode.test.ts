@@ -197,6 +197,76 @@ describe('decideMode', () => {
   });
 });
 
+describe('decideMode — remote.hookMode', () => {
+  it('keeps an automatic scan local when hookMode is local-only, key or no key', () => {
+    const decision = decideMode({
+      environment: environmentOf({ [API_KEY_VAR]: KEY }),
+      hookMode: 'local-only',
+    });
+
+    expect(decision.kind).toBe('local');
+    if (decision.kind === 'local') {
+      expect(decision.source).toBe('config');
+      expect(decision.reason).toContain('local-only');
+      // FR-10: the reason string is printed, so it names the variable and never
+      // the value — and this message is written about a key that IS present.
+      expect(decision.reason).not.toContain(KEY);
+    }
+  });
+
+  it('lets --remote override hookMode, because a flag is a decision made now', () => {
+    // A committed config must not veto the command somebody just typed. If it
+    // could, "local-only" would be a setting you cannot escape without editing a
+    // file — including in CI, where nothing else can change the mode.
+    const decision = decideMode({
+      remote: true,
+      environment: environmentOf({ [API_KEY_VAR]: KEY }),
+      hookMode: 'local-only',
+    });
+
+    expect(decision.kind).toBe('remote');
+  });
+
+  it('still reports a misspelled key as the reason when there is no key', () => {
+    // With no key and local-only set, the config is not what put us in Local
+    // Mode — the missing key is. Naming the config would send the developer
+    // looking for a setting that is not in the way.
+    const decision = decideMode({ environment: environmentOf({}), hookMode: 'local-only' });
+
+    expect(decision.kind).toBe('local');
+    if (decision.kind === 'local') {
+      expect(decision.source).toBe('no-key');
+      expect(decision.reason).toContain('not set');
+    }
+  });
+
+  it('is the default when the config says nothing', () => {
+    expect(decideMode({ environment: environmentOf({ [API_KEY_VAR]: KEY }) }).kind).toBe('remote');
+  });
+
+  it('changes nothing when it is explicitly "auto"', () => {
+    const decision = decideMode({
+      environment: environmentOf({ [API_KEY_VAR]: KEY }),
+      hookMode: 'auto',
+    });
+
+    expect(decision.kind).toBe('remote');
+  });
+
+  it('does not stop --local being reported as the cause when both apply', () => {
+    // Precedence is flag > config, and the reported cause has to match the
+    // precedence or the message contradicts the behaviour.
+    const decision = decideMode({
+      local: true,
+      environment: environmentOf({ [API_KEY_VAR]: KEY }),
+      hookMode: 'local-only',
+    });
+
+    expect(decision.kind).toBe('local');
+    if (decision.kind === 'local') expect(decision.source).toBe('flag');
+  });
+});
+
 describe('model selection', () => {
   it('defaults to the built-in model', () => {
     const decision = decideMode({ environment: environmentOf({ [API_KEY_VAR]: KEY }) });

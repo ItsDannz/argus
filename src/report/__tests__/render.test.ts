@@ -189,9 +189,18 @@ describe('renderConfigProblems', () => {
     expect(output).toContain('[CONFIG ERROR]');
   });
 
-  it('states that the settings were ignored and names the check command', () => {
+  it('says the run carried on, and names the check command', () => {
     const output = renderConfigProblems([{ where: '', message: 'bad' }], null);
-    expect(output).toContain('continued with its defaults');
+    expect(output).toContain('did not stop for this');
     expect(output).toContain('codeguard config --validate');
+  });
+
+  it('does not claim the defaults were used, because for one setting they are not', () => {
+    // `remote.hookMode` is the exception. Its default is "auto", but an invalid
+    // value falls back to "local-only" on purpose — so a blanket "we used the
+    // defaults" would be false, and false in the direction of telling a reader
+    // their commits may be talking to a provider when they are not.
+    const output = renderConfigProblems([{ where: '', message: 'bad' }], null);
+    expect(output).not.toContain('defaults');
   });
 });

@@ -25,6 +25,25 @@ export interface ThresholdConfig {
 }
 
 /**
+ * What the pre-commit hook is allowed to do on its own initiative (FR-3).
+ *
+ * FR-3's rule is that a key decides the mode automatically. That is the right
+ * default for someone who installed CodeGuard specifically to have their
+ * commits reviewed, and the wrong one for someone who wants the hook to stay a
+ * fast, local, offline check. The second developer currently has only one way
+ * out — stop exporting the key — which is no way out at all, because the key
+ * lives in `.env` precisely so they do not have to think about it.
+ *
+ *   "auto"        a key present means the hook scans remotely, unprompted.
+ *   "local-only"  the hook is local whether or not a key is available.
+ *
+ * "local-only" does NOT disable Remote Mode. `--remote` still performs an AI
+ * scan, because an explicit flag is a decision made a second ago by the person
+ * typing, and a file committed to the repository must not overrule it.
+ */
+export type HookMode = 'auto' | 'local-only';
+
+/**
  * Remote Mode knobs (PRD §6.1, §11).
  *
  * The PRD asks for cost control but deliberately does not name a budget, so the
@@ -46,6 +65,8 @@ export interface RemoteConfig {
   maxDeepAnalysisHunks: number;
   /** Per-request timeout in milliseconds, applied to each API call separately. */
   timeoutMs: number;
+  /** Whether an automatic scan may choose Remote Mode. See {@link HookMode}. */
+  hookMode: HookMode;
 }
 
 export interface CodeGuardConfig {
@@ -78,7 +99,11 @@ export const DEFAULT_CONFIG: ReadonlyCodeGuardConfig = {
   // requests a commit can trigger. Five keeps a remote pre-commit scan inside
   // roughly half a minute on a typical diff while still covering the worst
   // issues in it, because hunks are taken in severity order.
-  remote: { maxDeepAnalysisHunks: 5, timeoutMs: 60_000 },
+  //
+  // `hookMode: "auto"` is the default because it is the behaviour FR-3
+  // specifies, and a config file that changes what a committed repository does
+  // by default would surprise everyone who never opened it.
+  remote: { maxDeepAnalysisHunks: 5, timeoutMs: 60_000, hookMode: 'auto' },
 };
 
 /** A single thing wrong with a config file, addressed by dotted path. */
@@ -103,6 +128,7 @@ export function cloneConfig(config: ReadonlyCodeGuardConfig): CodeGuardConfig {
     remote: {
       maxDeepAnalysisHunks: config.remote.maxDeepAnalysisHunks,
       timeoutMs: config.remote.timeoutMs,
+      hookMode: config.remote.hookMode,
     },
     ...(config.model === undefined ? {} : { model: config.model }),
   };
@@ -167,6 +193,9 @@ function validateExcludePaths(raw: unknown, problems: ConfigProblem[]): string[]
   return paths;
 }
 
+/** The accepted `remote.hookMode` values, as a runtime set for the validator. */
+const HOOK_MODES: readonly HookMode[] = ['auto', 'local-only'];
+
 /**
  * Validates the `remote` block.
  *
@@ -174,6 +203,20 @@ function validateExcludePaths(raw: unknown, problems: ConfigProblem[]): string[]
  * negative number is a typo rather than a preference. `maxDeepAnalysisHunks: 0`
  * is accepted on purpose: "triage but do not patch" is a coherent thing to ask
  * for, and it is the cheapest useful Remote Mode.
+ *
+ * `hookMode` breaks the pattern the rest of this file follows, on purpose. Every
+ * other invalid value falls back to its default and is reported; an unrecognised
+ * `hookMode` falls back to `"local-only"`, which is NOT its default.
+ *
+ * The asymmetry is the point. A typo here — `"local_only"`, `"local"`, `"off"` —
+ * is somebody trying to stop their commits talking to a provider. Falling back
+ * to `"auto"` hands them exactly the behaviour they were switching off, and the
+ * only thing standing between their code and the network is whether they read a
+ * warning banner. Falling back to `"local-only"` guesses wrong in the direction
+ * that transmits nothing, and the banner tells them either way. Those two
+ * mistakes are not equally bad: one is a compromised gate, the other is a config
+ * that needs a second look. A wrong guess should always land on the side where
+ * no code leaves the machine.
  */
 function validateRemote(raw: unknown, problems: ConfigProblem[]): RemoteConfig {
   const remote: RemoteConfig = { ...DEFAULT_CONFIG.remote };
@@ -203,6 +246,23 @@ function validateRemote(raw: unknown, problems: ConfigProblem[]): RemoteConfig {
       continue;
     }
     remote[key] = value;
+  }
+
+  const hookMode = raw['hookMode'];
+  if (hookMode !== undefined) {
+    if (typeof hookMode === 'string' && HOOK_MODES.includes(hookMode as HookMode)) {
+      remote.hookMode = hookMode as HookMode;
+    } else {
+      // Not `remote.hookMode` (the default) — see the note above. This is the
+      // one invalid value in this file that does not fall back to its default.
+      remote.hookMode = 'local-only';
+      problems.push({
+        where: 'remote.hookMode',
+        message:
+          `must be "auto" or "local-only" — got ${JSON.stringify(hookMode)}. ` +
+          `Using "local-only" so nothing is sent to the API, but fix the spelling.`,
+      });
+    }
   }
 
   return remote;
