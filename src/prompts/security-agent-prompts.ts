@@ -28,6 +28,7 @@ export type Category =
   | "unhandled_exception"
   | "insecure_crypto"
   | "command_injection"
+  | "code_execution"
   | "logic_bug"
   | "other";
 

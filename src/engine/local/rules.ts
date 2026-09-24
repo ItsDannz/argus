@@ -269,7 +269,7 @@ const SQL_RULES: Rule[] = [
 const DYNAMIC_CODE_RULES: Rule[] = [
   {
     id: 'dynamic-code-execution-eval',
-    category: 'other',
+    category: 'code_execution',
     severity: 'High',
     message:
       'eval() parses and runs its argument as code. If any part of that string can be influenced by a user, it is arbitrary code execution. Prefer an explicit parser (JSON.parse, ast.literal_eval) or a lookup table of allowed operations.',
@@ -280,7 +280,7 @@ const DYNAMIC_CODE_RULES: Rule[] = [
   },
   {
     id: 'dynamic-code-execution-function-constructor',
-    category: 'other',
+    category: 'code_execution',
     severity: 'High',
     message:
       'The Function constructor compiles its argument as code and is equivalent to eval() — it is not a safer alternative. Prefer an explicit parser or a lookup table.',
@@ -289,7 +289,7 @@ const DYNAMIC_CODE_RULES: Rule[] = [
   },
   {
     id: 'dynamic-code-execution-python-exec',
-    category: 'other',
+    category: 'code_execution',
     severity: 'High',
     message:
       'exec() compiles and runs arbitrary Python. On any input a user can influence this is arbitrary code execution. Use ast.literal_eval for data, or a dispatch table for behaviour.',

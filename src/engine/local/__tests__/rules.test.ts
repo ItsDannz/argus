@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@jest/globals';
 
-import { runLocalScan } from '../index';
+import { DEFAULT_RULES, runLocalScan } from '../index';
 import { newFileDiff } from './helpers';
 
 /** Scans one line of code and returns the sorted ids of everything flagged. */
@@ -310,5 +310,49 @@ describe('whole-line comment skipping', () => {
   it('still flags a call inside a block comment', async () => {
     // Same limitation, for /* ... */ — only whole-line comments are skipped.
     expect(await ruleIdsFor('src/main.c', '/* strcpy(dest, src); */')).toEqual(['unsafe-c-strcpy']);
+  });
+});
+
+describe('rule metadata', () => {
+  // Categories are asserted against the rule definitions rather than through
+  // runLocalScan, because LocalFinding deliberately carries no category field —
+  // add it to the finding shape and this test should move with it.
+  const categoriesOf = (ids: string[]): string[] =>
+    ids.map((id) => DEFAULT_RULES.find((rule) => rule.id === id)!.category);
+
+  it('categorises dynamic code execution as code_execution, not other', () => {
+    // PRD §6.2 names dynamic code execution as its own risk type, so it gets its
+    // own category rather than being folded into "other" and losing the signal.
+    expect(
+      categoriesOf([
+        'dynamic-code-execution-eval',
+        'dynamic-code-execution-function-constructor',
+        'dynamic-code-execution-python-exec',
+      ]),
+    ).toEqual(['code_execution', 'code_execution', 'code_execution']);
+  });
+
+  it('categorises the crypto rules correctly', () => {
+    expect(
+      categoriesOf([
+        'insecure-crypto-md5',
+        'insecure-crypto-sha1',
+        'insecure-crypto-des',
+        'insecure-crypto-ecb',
+      ]),
+    ).toEqual(['insecure_crypto', 'insecure_crypto', 'insecure_crypto', 'insecure_crypto']);
+  });
+
+  it('gives every rule a unique id', () => {
+    const ids = DEFAULT_RULES.map((rule) => rule.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('uses no pattern with the global flag', () => {
+    // A /g regex carries lastIndex state between .exec() calls, so a shared
+    // pattern object would silently skip every second match. The Rule contract
+    // forbids it; this guards against it creeping back in.
+    const globalFlagged = DEFAULT_RULES.filter((rule) => rule.pattern.global).map((r) => r.id);
+    expect(globalFlagged).toEqual([]);
   });
 });
