@@ -208,6 +208,22 @@ maybe('pre-commit hook, end to end', () => {
     expect(result.code).toBe(0);
   });
 
+  it('says only "no staged changes" for an empty diff, and does not cry internal error', async () => {
+    // Regression, found by dogfooding: this path was built by calling the
+    // internal-error helper, which prints. So an ordinary `git commit
+    // --allow-empty` told the developer the tool had broken and asked them to
+    // file an issue.
+    const repo = await setupRepo();
+    await repo.installHook();
+
+    const result = await repo.commit('empty', '--allow-empty');
+
+    expect(result.code).toBe(0);
+    expect(result.output).toContain('no staged changes to scan');
+    expect(result.output).not.toContain('internal error');
+    expect(result.output).not.toContain('Please report this');
+  });
+
   it('is idempotent — re-installing leaves exactly one scan invocation', async () => {
     const repo = await setupRepo();
     await repo.installHook();

@@ -30,6 +30,7 @@ import {
   type CodeGuardConfig,
   type ConfigProblem,
 } from '../config/load';
+import { cloneConfig, DEFAULT_CONFIG } from '../config/schema';
 import type { LocalFinding } from '../engine/local/types';
 import { runLocalScan } from '../engine/local';
 import { evaluateThreshold, type ThresholdDecision } from '../engine/threshold';
@@ -147,6 +148,25 @@ export async function runPreCommitCheck(options: PreCommitOptions = {}): Promise
   const { write, writeError, render } = resolveIo(options);
   const cwd = options.cwd ?? process.cwd();
 
+  /**
+   * A result for a scan that produced no findings.
+   *
+   * Deliberately separate from {@link internalError}, which PRINTS. Building the
+   * empty-diff result by calling it meant `git commit --amend` with nothing
+   * staged — and `git commit --allow-empty` — printed "the security check did
+   * not run because of an internal error ... please report this" for a
+   * completely normal action. Found by dogfooding this repo's own hook; the
+   * lesson is that a helper with a printing side effect is not a constructor.
+   */
+  const emptyResult = (exitCode: number): ScanResult => ({
+    exitCode,
+    findings: [],
+    decision: evaluateThreshold([], DEFAULT_CONFIG.threshold),
+    config: cloneConfig(DEFAULT_CONFIG),
+    configPath: null,
+    configProblems: [],
+  });
+
   const internalError = (error: unknown): ScanResult => {
     const message = error instanceof Error ? error.message : String(error);
     writeError(
@@ -160,32 +180,22 @@ export async function runPreCommitCheck(options: PreCommitOptions = {}): Promise
         '',
       ].join('\n'),
     );
-    return {
-      exitCode: ALLOW_COMMIT_ON_INTERNAL_ERROR ? EXIT.OK : EXIT.ERROR,
-      findings: [],
-      decision: evaluateThreshold([], { blockOn: 'Critical', warnOn: 'High' }),
-      config: { threshold: { blockOn: 'Critical', warnOn: 'High' }, excludePaths: [] },
-      configPath: null,
-      configProblems: [],
-    };
+    return emptyResult(ALLOW_COMMIT_ON_INTERNAL_ERROR ? EXIT.OK : EXIT.ERROR);
   };
 
   try {
     const repoRoot = await findRepoRoot(cwd);
     if (repoRoot === null) {
       writeError('CodeGuard: not inside a Git repository — nothing to scan.\n');
-      return {
-        ...internalError(new Error('not a Git repository')),
-        exitCode: EXIT.ERROR,
-      };
+      return emptyResult(EXIT.ERROR);
     }
 
     const diff = await getStagedDiff(repoRoot);
-    // `git commit --allow-empty`, or a commit of only untracked-adjacent
-    // metadata, produces nothing to analyse. Not an error and not a warning.
+    // `git commit --allow-empty`, or `git commit --amend` with nothing staged,
+    // produces nothing to analyse. Not an error, and not a warning either.
     if (diff.trim() === '') {
       write('CodeGuard: no staged changes to scan.\n');
-      return { ...internalError(new Error('no staged changes')), exitCode: EXIT.OK };
+      return emptyResult(EXIT.OK);
     }
 
     return await scanDiff({ ...options, diff, repoRoot });
