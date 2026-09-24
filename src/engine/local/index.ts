@@ -33,6 +33,17 @@ export interface LocalScanOptions {
    * without touching the scanner.
    */
   rules?: readonly Rule[];
+  /**
+   * Predicate over repo-relative paths; return true to skip a file entirely.
+   *
+   * A predicate rather than a list of globs on purpose: glob syntax is a
+   * configuration concern, and taking a plain function keeps the engine free of
+   * it (and trivially testable). `compileExcludeMatcher` in config/schema.ts
+   * adapts the configured `excludePaths` into one of these.
+   *
+   * Applied before rule selection, so an excluded file costs nothing at all.
+   */
+  exclude?: (filePath: string) => boolean;
 }
 
 /**
@@ -53,6 +64,10 @@ export async function runLocalScan(
   for (const file of parseDiff(diff)) {
     // Binary content cannot be matched line-wise, and git gives us no hunks for it.
     if (file.isBinary) continue;
+
+    // Config-driven path exclusion (PRD §5.1). Skipped before rule selection so
+    // an excluded file does no work at all.
+    if (options.exclude?.(file.path) === true) continue;
 
     const applicable = rulesForFile(rules, file.path);
     if (applicable.length === 0) continue;

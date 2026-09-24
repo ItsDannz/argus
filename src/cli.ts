@@ -2,33 +2,79 @@
 /**
  * CodeGuard CLI entry point.
  *
- * Command surface is fixed to the three commands the PRD specifies (§5.1):
- *   scan    — analyse the staged diff and report findings
- *   patch   — re-open the interactive apply flow from the last saved report
- *   config  — inspect/initialise .codeguardrc.json
+ * Commands:
+ *   scan      analyse a diff and report findings (staged changes by default).
+ *             This is what the pre-commit hook runs.
+ *   install   write the pre-commit hook (Husky if the repo uses it, else .git/hooks)
+ *   patch     re-open the interactive apply flow from the last saved report (Phase 5)
+ *   config    show, or initialise, .codeguardrc.json
  *
- * Phase 1 scaffold: every command is wired into commander and `--help` lists
- * them, but the handlers are stubs. A stub exits with code 2 rather than 0 so an
- * unimplemented scan can never be mistaken for a clean scan by a caller (such as
- * the pre-commit hook in Phase 3).
+ * Exit codes are the CLI's contract with the hook and with any script wrapping
+ * it — see exit-codes.ts. They are distinct on purpose: an unimplemented
+ * command must never be mistakable for a clean scan, and "found a blocking
+ * issue" must never be mistakable for "the tool crashed".
  */
 
+import { readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+
 import { Command } from 'commander';
+
+import { CONFIG_FILENAME, cloneConfig, DEFAULT_CONFIG } from './config/schema';
+import { loadConfig } from './config/load';
+import { EXIT } from './exit-codes';
+import { findRepoRoot } from './git/repo';
+import { installPreCommitHook, runPreCommitCheck, scanDiff } from './hooks/pre-commit';
+import { renderConfigProblems } from './report/render';
 
 const VERSION = '0.1.0';
 
 /**
  * Reports that a command exists but has no implementation yet.
  *
- * Writes to stderr (not stdout) so that machine-readable stdout stays clean, and
- * sets exit code 2 — distinct from 0 ("scanned, nothing found") and 1
- * ("tool errored"), which callers will need to tell apart in Phase 3.
+ * Writes to stderr (not stdout) so machine-readable stdout stays clean, and
+ * exits 2 — distinct from 0 ("scanned, nothing found"), 1 ("tool errored") and
+ * 3 ("found a blocking issue"), so a stub can never impersonate a clean scan.
  */
 function notImplemented(command: string, phase: number): void {
-  process.stderr.write(
-    `codeguard ${command}: not implemented yet — scheduled for Phase ${phase}.\n`,
-  );
-  process.exitCode = 2;
+  process.stderr.write(`codeguard ${command}: not implemented yet — scheduled for Phase ${phase}.\n`);
+  process.exitCode = EXIT.NOT_IMPLEMENTED;
+}
+
+/**
+ * Whether ANSI colour is appropriate.
+ *
+ * Default off when stdout is not a terminal, so redirecting to a file or piping
+ * into another tool never produces escape sequences. `NO_COLOR` is honoured
+ * because it is the established convention for opting out.
+ */
+function colorEnabled(colorOption: boolean | undefined): boolean {
+  if (colorOption === false) return false;
+  const noColor = process.env['NO_COLOR'];
+  if (noColor !== undefined && noColor !== '') return false;
+  return process.stdout.isTTY === true;
+}
+
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+async function resolveRepoRoot(cwd: string): Promise<string> {
+  return (await findRepoRoot(cwd)) ?? cwd;
+}
+
+/**
+ * Repo-relative path with forward slashes, for display.
+ *
+ * Git speaks POSIX paths everywhere else (diff headers, hook paths), so showing
+ * the user a Windows-style `.git\hooks\pre-commit` next to them would read as a
+ * different path rather than the same one.
+ */
+function displayPath(repoRoot: string, target: string): string {
+  const relative = path.relative(repoRoot, target);
+  return (relative === '' ? target : relative).split(path.sep).join('/');
 }
 
 const program = new Command();
@@ -42,10 +88,73 @@ program
 
 program
   .command('scan')
-  .description('Scan the staged diff (git diff --cached) for security and logic issues')
+  .description('Scan a diff for security and logic issues (staged changes by default)')
+  .option('--staged', 'scan the Git index (default)')
+  .option('--diff <file>', "scan a diff from a file instead of the index ('-' for stdin)")
   .option('--local', 'force Local Static Engine Mode (rule-based, no API key needed)')
   .option('--remote', 'force Remote AI Mode (requires DEEPSEEK_API_KEY)')
-  .action(() => notImplemented('scan', 2));
+  .option('--no-color', 'disable colour in output')
+  .action(async (options: { diff?: string; remote?: boolean; color?: boolean }) => {
+    const useColor = colorEnabled(options.color);
+
+    // Remote Mode arrives in Phase 4. Reported rather than ignored, because a
+    // silently-local scan would look like the AI check the user asked for.
+    if (options.remote === true) {
+      notImplemented('scan --remote', 4);
+      return;
+    }
+
+    if (options.diff !== undefined) {
+      const diff = options.diff === '-' ? await readStdin() : await readFile(options.diff, 'utf8');
+      const result = await scanDiff({
+        diff,
+        repoRoot: await resolveRepoRoot(process.cwd()),
+        useColor,
+      });
+      process.exitCode = result.exitCode;
+      return;
+    }
+
+    const result = await runPreCommitCheck({ useColor });
+    process.exitCode = result.exitCode;
+  });
+
+program
+  .command('install')
+  .description('Install the pre-commit hook (Husky if the repo uses it, otherwise .git/hooks)')
+  .action(async () => {
+    const cwd = process.cwd();
+    const repoRoot = await findRepoRoot(cwd);
+    if (repoRoot === null) {
+      process.stderr.write('codeguard install: not inside a Git repository.\n');
+      process.exitCode = EXIT.ERROR;
+      return;
+    }
+
+    const result = await installPreCommitHook(repoRoot);
+    const shown = displayPath(repoRoot, result.hookPath);
+
+    // Which mechanism was chosen is stated rather than left implicit: the user
+    // asked for a hook and deserves to know where it went and why.
+    const via = result.mechanism === 'husky' ? 'Husky' : 'native Git hooks';
+    process.stdout.write(`CodeGuard: installed pre-commit hook via ${via} (${shown})\n`);
+
+    if (result.mechanism === 'husky' && result.coreHooksPath !== null) {
+      process.stdout.write(`  detected via core.hooksPath = ${result.coreHooksPath}\n`);
+    }
+
+    if (result.action === 'wrapped' && result.backupPath !== null) {
+      const backup = displayPath(repoRoot, result.backupPath);
+      process.stdout.write(
+        `  an existing hook was preserved at ${backup} and will still run first — nothing was overwritten\n`,
+      );
+    } else if (result.action === 'updated') {
+      process.stdout.write('  updated the existing CodeGuard hook in place (re-install is safe)\n');
+    }
+
+    process.stdout.write('  the hook runs: codeguard scan --staged\n');
+    process.stdout.write('  escape hatch:  git commit --no-verify\n');
+  });
 
 program
   .command('patch')
@@ -55,11 +164,49 @@ program
 
 program
   .command('config')
-  .description('Show or initialise CodeGuard configuration (.codeguardrc.json)')
-  .action(() => notImplemented('config', 2));
+  .description(`Show, or initialise, CodeGuard configuration (${CONFIG_FILENAME})`)
+  .option('--init', `write a starter ${CONFIG_FILENAME} with the defaults`)
+  .action(async (options: { init?: boolean }) => {
+    const repoRoot = await resolveRepoRoot(process.cwd());
+
+    if (options.init === true) {
+      const target = path.join(repoRoot, CONFIG_FILENAME);
+      try {
+        await writeFile(target, `${JSON.stringify(cloneConfig(DEFAULT_CONFIG), null, 2)}\n`, {
+          encoding: 'utf8',
+          flag: 'wx', // fail if it exists, rather than discarding a real config
+        });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+          process.stderr.write(
+            `codeguard config: ${CONFIG_FILENAME} already exists — not overwriting it.\n`,
+          );
+          process.exitCode = EXIT.ERROR;
+          return;
+        }
+        throw error;
+      }
+      process.stdout.write(`CodeGuard: wrote ${displayPath(repoRoot, target)}\n`);
+      return;
+    }
+
+    const loaded = await loadConfig(repoRoot);
+    const lines = [
+      'CodeGuard configuration',
+      `  config file    ${loaded.path ?? 'none — using defaults'}`,
+      `  block on       ${loaded.config.threshold.blockOn}`,
+      `  warn on        ${loaded.config.threshold.warnOn}`,
+      `  exclude paths  ${loaded.config.excludePaths.length > 0 ? loaded.config.excludePaths.join(', ') : 'none'}`,
+      `  model          ${loaded.config.model ?? 'default (Phase 4)'}`,
+    ];
+    process.stdout.write(`${lines.join('\n')}\n`);
+
+    const warning = renderConfigProblems(loaded.problems, loaded.path, { useColor: colorEnabled(undefined) });
+    if (warning !== '') process.stderr.write(`\n${warning}\n`);
+  });
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   const message = err instanceof Error ? err.message : String(err);
   process.stderr.write(`codeguard: ${message}\n`);
-  process.exitCode = 1;
+  process.exitCode = EXIT.ERROR;
 });
