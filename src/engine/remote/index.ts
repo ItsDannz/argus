@@ -46,6 +46,11 @@
  * spend the cap on timeouts — but the findings already gathered are kept. Every
  * hunk still waiting is reported from triage, without a patch. Degrading all the
  * way to Local would throw away real results to punish a partial outage.
+ *
+ * One failure is excepted from that, and retried once: a well-formed answer with
+ * no content in it. It costs a request, and the alternative is losing the patch
+ * that is the entire reason Stage 2 exists — see `isEmptyAnswer`, which also says
+ * why the other kinds are not retried.
  */
 
 import type { Category, PatchSuggestion, ScanFinding, Severity } from '../../prompts/security-agent-prompts';
@@ -58,7 +63,7 @@ import {
 import type { Finding } from '../findings';
 import { reconcileWithBaseline } from '../reconcile';
 import { filterExcludedFiles, truncateToBudget } from './budget';
-import { createDeepSeekClient, type LlmClient } from './client';
+import { createDeepSeekClient, LlmError, type LlmClient } from './client';
 import { selectFlaggedHunks } from './context';
 import { parsePatchResponse, parseTriageResponse } from './parse';
 import { containsPlaceholder, redactDiff, type Redaction } from './redact';
@@ -161,6 +166,26 @@ function toFinding(finding: ScanFinding): Finding {
     severity: finding.severity,
     message: finding.summary,
   };
+}
+
+/**
+ * The one provider failure worth repeating: an empty but well-formed answer.
+ *
+ * Observed live, which is why it is here at all. Deep analysis of a hunk came
+ * back as `provider returned nothing usable`, the scan degraded to triage-only
+ * findings as designed — and the identical call had succeeded minutes earlier on
+ * the identical input. Nothing about the request, the credential or the endpoint
+ * had changed, so asking again was worth one request. The thing being bought is
+ * the patch, and the patch is the whole value of Stage 2.
+ *
+ * Deliberately not the other three kinds. A transport failure and a non-2xx are
+ * statements about reachability or about the request itself; repeating an
+ * unreachable call spends the timeout twice to reach the same conclusion, and
+ * repeating a request the provider just rejected gets the same rejection. Those
+ * deserve the caller's fallback, not a second attempt.
+ */
+function isEmptyAnswer(error: unknown): boolean {
+  return error instanceof LlmError && error.kind === 'empty';
 }
 
 /**
@@ -337,6 +362,33 @@ export async function runRemoteScan(options: RemoteScanOptions): Promise<RemoteS
     for (const hunk of selection.beyondCap) short(hunk.findings);
   }
 
+  /**
+   * One Stage-2 request, with a single retry for an empty answer.
+   *
+   * Bounded to one on purpose. Two identical empty answers in a row is a pattern
+   * rather than a hiccup, and the caller already knows what to do with it — keep
+   * the findings already gathered and report the rest without patches. Further
+   * attempts would only delay that.
+   *
+   * The signal is rebuilt for the retry: `AbortSignal.timeout` starts counting
+   * when it is created, so reusing the first one would hand the second attempt
+   * whatever little was left of the first attempt's budget.
+   */
+  const deepAnalyse = async (file: string, user: string): Promise<string> => {
+    const request = { system: PATCH_SYSTEM_PROMPT, user, reasoning: true };
+    const signal = (): AbortSignal => requestSignal(options.signal, options.remote.timeoutMs);
+
+    requestCount += 1;
+    try {
+      return await client.complete(request, signal());
+    } catch (error) {
+      if (!isEmptyAnswer(error)) throw error;
+      progress(`CodeGuard: deep analysis of ${file} came back empty; retrying it once.`);
+      requestCount += 1;
+      return await client.complete(request, signal());
+    }
+  };
+
   for (const [index, hunk] of selection.selected.entries()) {
     const headline = hunk.findings[0];
     const line = headline?.line_range[0] ?? 1;
@@ -346,25 +398,20 @@ export async function runRemoteScan(options: RemoteScanOptions): Promise<RemoteS
     );
 
     let text: string;
-    requestCount += 1;
     try {
-      text = await client.complete(
-        {
-          system: PATCH_SYSTEM_PROMPT,
-          user: buildPatchUserPrompt({
-            file: hunk.file,
-            flaggedSummary: headline?.summary ?? '',
-            category: headline?.category ?? 'other',
-            hunk: hunk.text,
-            // No surrounding file content is passed, deliberately. FR-4 scopes
-            // Remote Mode to the diff, and the only other source of context is
-            // the working tree — sending code the developer did not stage is
-            // exactly the exposure the diff-only rule exists to prevent. The
-            // hunk already carries git's own three lines of context either side.
-          }),
-          reasoning: true,
-        },
-        requestSignal(options.signal, options.remote.timeoutMs),
+      text = await deepAnalyse(
+        hunk.file,
+        buildPatchUserPrompt({
+          file: hunk.file,
+          flaggedSummary: headline?.summary ?? '',
+          category: headline?.category ?? 'other',
+          hunk: hunk.text,
+          // No surrounding file content is passed, deliberately. FR-4 scopes
+          // Remote Mode to the diff, and the only other source of context is
+          // the working tree — sending code the developer did not stage is
+          // exactly the exposure the diff-only rule exists to prevent. The
+          // hunk already carries git's own three lines of context either side.
+        }),
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

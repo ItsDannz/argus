@@ -226,7 +226,7 @@ describe('runRemoteScan — failure handling', () => {
   it('keeps triage findings when Stage 2 fails, without throwing', async () => {
     const client = stubProvider({
       triage: TRIAGE_TWO,
-      patch: () => new LlmError('provider returned 503'),
+      patch: () => new LlmError('provider returned 503', 'http', 503),
     });
 
     const outcome = await runRemoteScan({
@@ -246,9 +246,14 @@ describe('runRemoteScan — failure handling', () => {
   it('stops calling the provider after the first Stage-2 failure', async () => {
     // A failed call is likely to be followed by more failed calls. Retrying the
     // rest would spend the cap on timeouts and turn one hiccup into a stall.
+    //
+    // The kind is load-bearing here and is why it is spelled out: `http` is an
+    // ANSWER — the provider understood the request and refused it — so one call
+    // is right. `empty` is the one kind that gets a retry, and this test fails
+    // if that ever widens (see the retry tests below).
     const client = stubProvider({
       triage: TRIAGE_TWO,
-      patch: () => new LlmError('provider returned 503'),
+      patch: () => new LlmError('provider returned 503', 'http', 503),
     });
 
     await runRemoteScan({ diff: TWO_FILE_DIFF, credentials: CREDENTIALS, remote: REMOTE, client });
@@ -272,7 +277,7 @@ describe('runRemoteScan — failure handling', () => {
             confidence: 'high',
           };
         }
-        return new LlmError('provider returned 503');
+        return new LlmError('provider returned 503', 'http', 503);
       },
     });
 
@@ -309,6 +314,124 @@ describe('runRemoteScan — failure handling', () => {
     expect(outcome.analyses[0]?.file).toBe('src/run.js');
     expect(outcome.notAnalysed).toHaveLength(1);
     expect(notesText(outcome.notes)).toContain('src/db.js returned something unusable');
+  });
+});
+
+describe('runRemoteScan — the empty-answer retry', () => {
+  /**
+   * The one Stage-2 failure that is not an answer to the request.
+   *
+   * Observed live: the provider returned a well-formed envelope with no message
+   * content for a hunk, having answered the same call successfully moments
+   * earlier. That is a hiccup rather than a structural incompatibility, and
+   * Phase 5's whole value is the patch, so the pipeline spends one more request
+   * before giving up on it. Every other kind — transport, http, malformed — is
+   * an answer, and asking again gets the same one.
+   */
+  const EMPTY = new LlmError(
+    'provider returned nothing usable — the response contained no message content',
+    'empty',
+  );
+
+  /** Mirrors the stub's own default answer, for the attempts after the first. */
+  function answerFor(request: LlmRequest): Record<string, unknown> {
+    const file = fileAsked(request);
+    return {
+      file,
+      line_range: [2, 2],
+      severity: file === 'src/db.js' ? 'Critical' : 'High',
+      category: file === 'src/db.js' ? 'sql_injection' : 'command_injection',
+      explanation: `The change in ${file} is still exploitable.`,
+      suggested_patch: `--- a/${file}\n+++ b/${file}\n@@ -1 +1 @@\n`,
+      confidence: 'high',
+    };
+  }
+
+  it('retries once and keeps the patch when the second attempt answers', async () => {
+    const client = stubProvider({
+      triage: TRIAGE_TWO,
+      patch: (index, request) => (index === 0 ? EMPTY : answerFor(request)),
+    });
+    const said: string[] = [];
+
+    const outcome = await runRemoteScan({
+      diff: TWO_FILE_DIFF,
+      credentials: CREDENTIALS,
+      remote: REMOTE,
+      client,
+      onProgress: (message) => void said.push(message),
+    });
+
+    // Both hunks analysed, both with patches — the retry recovered the first.
+    expect(outcome.analyses).toHaveLength(2);
+    expect(outcome.analyses.every((analysis) => analysis.patch !== '')).toBe(true);
+    expect(outcome.notAnalysed).toHaveLength(0);
+    expect(outcome.findings).toHaveLength(2);
+
+    // One triage call, then two for the first hunk (empty, then answered) and
+    // one for the second. The cap counts requests, not hunks, so a silently
+    // unlimited retry would show up here rather than as a hung commit.
+    expect(outcome.requestCount).toBe(4);
+
+    // The retry is not silent. A scan that took an extra round trip and said
+    // nothing would look identical to one that did not need it.
+    expect(notesText(said)).toContain('came back empty; retrying it once');
+    expect(notesText(outcome.notes)).not.toContain('Deep analysis stopped');
+  });
+
+  it('gives up after exactly one retry rather than hammering the provider', async () => {
+    // Two identical empty answers in a row is a pattern, not a hiccup. The
+    // caller already knows what to do with it: keep what was gathered and report
+    // the rest without patches.
+    const client = stubProvider({
+      triage: TRIAGE_TWO,
+      patch: () => EMPTY,
+    });
+
+    const outcome = await runRemoteScan({
+      diff: TWO_FILE_DIFF,
+      credentials: CREDENTIALS,
+      remote: REMOTE,
+      client,
+    });
+
+    const deep = client.requests.filter((request) => !request.system.includes('triage engine'));
+    // Two, not three: the retry, and then no more.
+    expect(deep).toHaveLength(2);
+    expect(outcome.requestCount).toBe(3);
+
+    // Degrades to the triage-only path — the pre-existing behaviour, reached one
+    // request later. A partial outage must not become a green scan.
+    expect(outcome.analyses).toHaveLength(0);
+    expect(outcome.findings).toHaveLength(2);
+    expect(outcome.notAnalysed).toHaveLength(2);
+    expect(notesText(outcome.notes)).toContain('Deep analysis stopped');
+    // The failure reported is the retry's, and it still says why.
+    expect(notesText(outcome.notes)).toContain('nothing usable');
+  });
+
+  it('does not retry an answer that failed for any other reason', async () => {
+    // The narrowness is the whole design. A 503 is an answer about the request,
+    // a transport error is an answer about the network, and malformed text is an
+    // answer about the model — repeating any of them costs a round trip and
+    // returns the same thing.
+    for (const failure of [
+      new LlmError('provider returned 503', 'http', 503),
+      new LlmError('could not reach https://api.deepseek.com'),
+      new LlmError('provider returned a non-JSON body', 'malformed'),
+    ]) {
+      const client = stubProvider({ triage: TRIAGE_TWO, patch: () => failure });
+
+      await runRemoteScan({
+        diff: TWO_FILE_DIFF,
+        credentials: CREDENTIALS,
+        remote: REMOTE,
+        client,
+      });
+
+      const deep = client.requests.filter((request) => !request.system.includes('triage engine'));
+      expect(deep).toHaveLength(1);
+    }
   });
 });
 

@@ -129,6 +129,22 @@ export interface DeepSeekClientOptions {
 }
 
 /**
+ * How the request failed, for callers that have to behave differently per case.
+ *
+ *   transport  the provider was never reached
+ *   http       the provider answered with a non-2xx
+ *   malformed  the provider answered, but not with the JSON envelope we expect
+ *   empty      a well-formed envelope with no message content in it
+ *
+ * The distinction exists because one of these is worth retrying and the others
+ * are not — see `isEmptyAnswer` in remote/index.ts. `empty` is the odd one out:
+ * it is not a statement about the request, the credential, or the endpoint, all
+ * of which are unchanged a second later, so a repeat costs one request and may
+ * well work. The other three are answers, and asking again gets the same answer.
+ */
+export type LlmFailureKind = 'transport' | 'http' | 'malformed' | 'empty';
+
+/**
  * A failure talking to the provider.
  *
  * Carries no request detail — the request headers hold the API key, and an
@@ -137,7 +153,11 @@ export interface DeepSeekClientOptions {
  * even a provider that echoes the credential back cannot get it printed.
  */
 export class LlmError extends Error {
-  constructor(message: string, readonly status?: number) {
+  constructor(
+    message: string,
+    readonly kind: LlmFailureKind = 'transport',
+    readonly status?: number,
+  ) {
     super(message);
     this.name = 'LlmError';
   }
@@ -180,6 +200,7 @@ export function createDeepSeekClient(options: DeepSeekClientOptions): LlmClient 
         // 404 HTML page cannot flood the terminal.
         throw new LlmError(
           `provider returned ${response.status} ${response.statusText} — ${safe(text.slice(0, 300))}`,
+          'http',
           response.status,
         );
       }
@@ -188,7 +209,10 @@ export function createDeepSeekClient(options: DeepSeekClientOptions): LlmClient 
       try {
         parsed = JSON.parse(text) as ChatCompletionResponse;
       } catch {
-        throw new LlmError(`provider returned a non-JSON body — ${safe(text.slice(0, 300))}`);
+        throw new LlmError(
+          `provider returned a non-JSON body — ${safe(text.slice(0, 300))}`,
+          'malformed',
+        );
       }
 
       // `content` is the answer; `reasoning_content` is the chain of thought and
@@ -197,7 +221,10 @@ export function createDeepSeekClient(options: DeepSeekClientOptions): LlmClient 
       const content = parsed.choices?.[0]?.message?.content;
       if (typeof content !== 'string' || content.trim() === '') {
         const reason = parsed.error?.message ?? 'the response contained no message content';
-        throw new LlmError(`provider returned nothing usable — ${safe(reason)}`);
+        // `empty`, not `transport`: the call worked. Observed live — the same
+        // request succeeded moments earlier and succeeded again on a repeat,
+        // which is what makes this the one failure worth retrying.
+        throw new LlmError(`provider returned nothing usable — ${safe(reason)}`, 'empty');
       }
 
       return content;
