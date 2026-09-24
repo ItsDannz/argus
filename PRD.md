@@ -90,7 +90,7 @@ Developers, especially students and solo/small-team developers, need something i
 | Aspect | Detail |
 | --- | --- |
 | Trigger | Valid API key found in config/env |
-| Models | `deepseek-v4.1-flash` for both stages, with reasoning toggled per request: reasoning **off** for fast first-pass triage of the whole diff; reasoning **on** for deep analysis + patch generation on flagged hunks only (cost control: the reasoning call is only invoked on findings, not the whole diff) |
+| Models | `deepseek-flash` for both stages, with reasoning toggled per request: reasoning **off** for fast first-pass triage of the whole diff; reasoning **on** for deep analysis + patch generation on flagged hunks only (cost control: the reasoning call is only invoked on findings, not the whole diff) |
 | Capabilities | Contextual logic-bug detection, cross-hunk reasoning, natural-language risk explanation, AI-generated patch diff |
 | Output | Two structured shapes (defined in `src/prompts/security-agent-prompts.ts`): triage returns a `ScanFinding` — `{ file, line_range, severity, category, summary }`; deep analysis returns a `PatchSuggestion` — `{ file, line_range, severity, category, explanation, suggested_patch, confidence }`, where `suggested_patch` is empty if the hunk turns out to be a false positive |
 | User Action | Review explanation → Accept / Reject / Edit patch → Apply |
@@ -161,7 +161,7 @@ Developers, especially students and solo/small-team developers, need something i
 | --- | --- |
 | CLI / Extension Runtime | Node.js + TypeScript |
 | Git Integration | Git Hook API (via Husky or native hook scripts) + `simple-git` for diff parsing |
-| AI Provider | DeepSeek API — `deepseek-v4.1-flash` for both stages (reasoning off for scan, on for patch) |
+| AI Provider | DeepSeek API — `deepseek-flash` for both stages (reasoning off for scan, on for patch) |
 | Local Rule Engine | Custom regex/pattern-matcher module (no external ML dependency) |
 | Config | `.codeguardrc.json` (per-project) + OS-level secure storage or `.env` for API key |
 | VS Code Extension | VS Code Extension API (Diagnostics + CodeAction providers) |
@@ -211,9 +211,9 @@ Developer runs `git commit`
         ▼
  Mode Detector (API key present & reachable?)
    ├── Yes → Remote AI Mode
-   │           ├── v4.1-flash (reasoning off): quick scan of full diff
+   │           ├── deepseek-flash (reasoning off): quick scan of full diff
    │           ├── Flag suspicious hunks
-   │           └── v4.1-flash (reasoning on): deep analysis + patch generation (flagged hunks only)
+   │           └── deepseek-flash (reasoning on): deep analysis + patch generation (flagged hunks only)
    └── No / Fallback → Local Static Engine
                └── Regex rule set applied to diff hunks
         │

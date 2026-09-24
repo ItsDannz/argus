@@ -22,7 +22,7 @@ You are implementing **CodeGuard**, an Autonomous Code Security Guard & Patch Ag
 
 ### Model note to flag, not resolve silently
 
-The PRD's original design used two DeepSeek tiers: a fast model for triage and a stronger model for deep analysis + patching. The model actually available is **`deepseek-v4.1-flash`** (API model id), which now supports a native reasoning mode itself. Before Phase 4, ask me whether to:
+The PRD's original design used two DeepSeek tiers: a fast model for triage and a stronger model for deep analysis + patching. The model actually available is **`deepseek-flash`** (API model id), which now supports a native reasoning mode itself. Before Phase 4, ask me whether to:
 
 - (a) keep the two-call design (flash-mode call for triage, reasoning-mode call for patch generation, same model, different mode flag), or
 - (b) simplify to a single reasoning-enabled call per flagged hunk. Don't just pick one.
@@ -63,7 +63,7 @@ Before touching code: summarize your understanding of the project back to me in 
 ### Phase 4 — Remote AI Mode (FR-3, FR-4, FR-5, FR-6)
 
 - Mode detector (API key present + reachable → Remote; else → Local fallback)
-- Call `deepseek-v4.1-flash` using the prompts from `security-agent-prompts.ts` (resolve the model-note decision point first)
+- Call `deepseek-flash` using the prompts from `security-agent-prompts.ts` (resolve the model-note decision point first)
 - Parse structured JSON output into `ScanFinding` / `PatchSuggestion`
 - **Done when:** scanning a diff with a deliberate SQL injection returns a real structured finding + patch suggestion from the live API, AND disconnecting network / removing the API key falls back to Local Mode without crashing.
 

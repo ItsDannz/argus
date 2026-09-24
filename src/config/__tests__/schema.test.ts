@@ -21,14 +21,14 @@ describe('validateConfig', () => {
       threshold: { blockOn: 'High', warnOn: 'Medium' },
       excludePaths: ['dist/**'],
       remote: { maxDeepAnalysisHunks: 2, timeoutMs: 5_000, hookMode: 'local-only' },
-      model: 'deepseek-v4.1-flash',
+      model: 'deepseek-flash',
     });
     expect(problems).toEqual([]);
     expect(config).toEqual({
       threshold: { blockOn: 'High', warnOn: 'Medium' },
       excludePaths: ['dist/**'],
       remote: { maxDeepAnalysisHunks: 2, timeoutMs: 5_000, hookMode: 'local-only' },
-      model: 'deepseek-v4.1-flash',
+      model: 'deepseek-flash',
     });
   });
 

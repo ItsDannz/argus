@@ -43,7 +43,27 @@ export interface LlmClient {
 }
 
 export const DEFAULT_BASE_URL = 'https://api.deepseek.com';
-export const DEFAULT_MODEL = 'deepseek-v4.1-flash';
+
+/**
+ * The model id both stages run on, when nothing overrides it.
+ *
+ * ─── Where this value came from ──────────────────────────────────────────────
+ * From the provider's own 400 response, not from documentation. This constant
+ * previously read `deepseek-v4.1-flash`, taken from external docs that were
+ * wrong for the account in use; the API rejected it with
+ * `invalid_request_error` and listed the names it does accept — `deepseek-flash`
+ * and `deepseek-v4-pro` — and that list is the only one authoritative for the
+ * endpoint actually being called.
+ *
+ * The lesson generalises past this one string. A model id is not a fact about
+ * DeepSeek; it is a fact about an account on an endpoint, and it can differ by
+ * region, by plan, and over time. So it is a value to be overridden and never a
+ * value to be re-derived from a blog post — hence `CODEGUARD_MODEL` (see
+ * engine/mode.ts) and the config `model` key, which resolve before this
+ * constant is consulted. If a future scan starts failing with a 400 and a list
+ * of names, the fix is one line in `.env`, not a code change.
+ */
+export const DEFAULT_MODEL = 'deepseek-flash';
 
 /**
  * How reasoning is requested, per DeepSeek's Thinking Mode guide.

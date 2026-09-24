@@ -29,7 +29,18 @@ import { DEFAULT_MODEL } from './remote/client';
 /** Environment variable holding the key. Named in docs and errors, never its value. */
 export const API_KEY_VAR = 'DEEPSEEK_API_KEY';
 
-/** Overrides the model id without editing a committed config file. */
+/**
+ * Overrides the model id without editing a committed config file.
+ *
+ * This exists because a model id is the one setting most likely to be wrong for
+ * reasons outside this project's control. It comes from the provider, it varies
+ * by account, and it changes: `deepseek-v4.1-flash` had to become
+ * `deepseek-flash` after the live API rejected the former, having got the name
+ * from documentation that was simply wrong for the account in use. A wrong id
+ * fails with a 400 that names the ones the endpoint does accept, and with this
+ * variable the correction is one line in `.env` rather than a code change and a
+ * release.
+ */
 export const MODEL_VAR = 'CODEGUARD_MODEL';
 
 /**

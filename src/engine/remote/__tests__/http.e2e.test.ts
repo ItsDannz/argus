@@ -112,7 +112,7 @@ const pendingTimers: NodeJS.Timeout[] = [];
  */
 function credentials(): { apiKey: string; model: string; baseUrl: string } {
   if (baseUrl === '') throw new Error('the test server is not listening yet');
-  return { apiKey: KEY, model: 'deepseek-v4.1-flash', baseUrl };
+  return { apiKey: KEY, model: 'deepseek-flash', baseUrl };
 }
 
 /**
