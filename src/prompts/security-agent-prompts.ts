@@ -63,6 +63,7 @@ Flag a hunk if it plausibly introduces or contains any of:
 - Hardcoded secrets (API keys, passwords, tokens, private keys)
 - Unsafe C functions (e.g. strcpy, gets, sprintf, system, memcpy without bounds check)
 - Command / shell injection
+- Dynamic code execution (e.g. eval, exec, the Function constructor)
 - Insecure cryptography (e.g. MD5/SHA1 for passwords, ECB mode, weak RNG for security use)
 - Unhandled exceptions around I/O, parsing, or network calls
 - Logic bugs that change existing behavior in a way that looks unintentional (off-by-one, inverted condition, wrong operator)
@@ -82,7 +83,7 @@ Output STRICT JSON only, matching this shape, with no markdown fences and no tex
       "file": "string (path as it appears in the diff)",
       "line_range": [start_line, end_line],
       "severity": "Critical" | "High" | "Medium" | "Low",
-      "category": "sql_injection" | "hardcoded_secret" | "unsafe_c_function" | "unhandled_exception" | "insecure_crypto" | "command_injection" | "logic_bug" | "other",
+      "category": "sql_injection" | "hardcoded_secret" | "unsafe_c_function" | "unhandled_exception" | "insecure_crypto" | "command_injection" | "code_execution" | "logic_bug" | "other",
       "summary": "one sentence, plain language"
     }
   ]
@@ -119,7 +120,7 @@ Output STRICT JSON only, matching this shape, with no markdown fences and no tex
   "file": "string",
   "line_range": [start_line, end_line],
   "severity": "Critical" | "High" | "Medium" | "Low",
-  "category": "sql_injection" | "hardcoded_secret" | "unsafe_c_function" | "unhandled_exception" | "insecure_crypto" | "command_injection" | "logic_bug" | "other",
+  "category": "sql_injection" | "hardcoded_secret" | "unsafe_c_function" | "unhandled_exception" | "insecure_crypto" | "command_injection" | "code_execution" | "logic_bug" | "other",
   "explanation": "2-4 sentences: what the risk is and why the patch fixes it",
   "suggested_patch": "unified diff string, empty if false positive",
   "confidence": "high" | "medium" | "low"
