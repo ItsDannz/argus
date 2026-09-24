@@ -2,8 +2,14 @@
  * System prompts for CodeGuard's Remote AI Mode.
  *
  * Two-stage pipeline (see PRD §6.1, §9.2):
- *   1. SCAN_SYSTEM_PROMPT   -> deepseek-flash  : fast triage over the full diff
- *   2. PATCH_SYSTEM_PROMPT  -> deepseek-reasoner: deep analysis + patch, only on flagged hunks
+ *   1. SCAN_SYSTEM_PROMPT   -> deepseek-v4.1-flash, reasoning OFF : fast triage over the full diff
+ *   2. PATCH_SYSTEM_PROMPT  -> deepseek-v4.1-flash, reasoning ON  : deep analysis + patch, only on flagged hunks
+ *
+ * Both stages use the SAME model id. They are separated by a per-request
+ * reasoning flag rather than by distinct model names — the older
+ * deepseek-chat / deepseek-reasoner aliases are retired. Leaving reasoning off
+ * for triage is the cost-control lever: the expensive reasoning pass only ever
+ * runs on hunks that stage 1 already flagged, never over the whole diff.
  *
  * Both stages are constrained to strict JSON output so the CLI/extension can
  * parse results deterministically (no markdown fences, no prose wrapper).
@@ -44,7 +50,7 @@ export interface PatchSuggestion {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 1 — Fast triage (deepseek-flash)
+// Stage 1 — Fast triage (deepseek-v4.1-flash, reasoning OFF)
 // ---------------------------------------------------------------------------
 
 export const SCAN_SYSTEM_PROMPT = `You are the triage engine inside CodeGuard, a pre-commit security and logic-bug scanner.
@@ -86,7 +92,7 @@ export function buildScanUserPrompt(diff: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Stage 2 — Deep analysis + patch generation (deepseek-reasoner)
+// Stage 2 — Deep analysis + patch generation (deepseek-v4.1-flash, reasoning ON)
 // ---------------------------------------------------------------------------
 
 export const PATCH_SYSTEM_PROMPT = `You are the deep-analysis and patching engine inside CodeGuard, a pre-commit security and logic-bug scanner.
