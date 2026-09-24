@@ -5,7 +5,8 @@
   },
   "remote": {
     "maxDeepAnalysisHunks": 5,
-    "timeoutMs": 60000
+    "timeoutMs": 60000,
+    "hookMode": "local-only"
   },
   "excludePaths": [
     "src/engine/local/rules.ts",
