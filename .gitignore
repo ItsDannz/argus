@@ -1,0 +1,26 @@
+# --- Dependencies ---
+node_modules/
+
+# --- Build output ---
+dist/
+
+# --- Secrets (FR-10: the API key must never reach the repo) ---
+.env
+.env.local
+.env.*.local
+
+# --- CodeGuard's own local scan report (FR-12) ---
+.codeguard/
+
+# --- Editor / OS noise ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code machine-local permission grants (not shared project config)
+.claude/settings.local.json
+
+# --- Logs ---
+*.log
+npm-debug.log*
