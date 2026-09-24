@@ -1,20 +1,77 @@
 /**
  * Local Static Engine — regex/pattern detection over diff hunks (FR-8).
  *
- * Phase 1 scaffold: the public surface is fixed here so the rest of the codebase
- * can compile against it, but the rule set itself lands in Phase 2.
+ * Detection only. There is deliberately no patch generation here: PRD §5.2 puts
+ * auto-patching out of scope for Local Mode, which is why `LocalFinding` has no
+ * `suggested_patch` field to fill in.
+ *
+ * Scope of analysis is ADDED lines only. A vulnerability that this commit
+ * deletes is not this commit's problem, and flagging unchanged context would
+ * report issues the developer never introduced — which is precisely the noise
+ * that gets a pre-commit gate switched off.
  */
 
+import { parseDiff } from '../diff';
+import { DEFAULT_RULES, rulesForFile, type Rule } from './rules';
 import type { LocalFinding } from './types';
 
 export type { LocalFinding } from './types';
+export type { Rule } from './rules';
+export { DEFAULT_RULES, rulesForFile } from './rules';
+
+export interface LocalScanOptions {
+  /**
+   * Rule set to run. Defaults to the built-in set. Exists so FR-13
+   * (user-defined rules) or a config-driven subset can be injected later
+   * without touching the scanner.
+   */
+  rules?: readonly Rule[];
+}
 
 /**
- * Runs the configured rule set over a unified diff.
+ * Runs the rule set over a unified diff.
  *
  * @param diff Raw output of `git diff --cached` (unified diff format).
- * @returns One finding per matched rule per line, in file/line order.
+ * @returns One finding per matched rule per line, in diff order (file, then
+ *          line, then rule). Never throws on malformed input — an unparseable
+ *          diff yields no findings rather than crashing a pre-commit hook.
  */
-export async function runLocalScan(_diff: string): Promise<LocalFinding[]> {
-  throw new Error('runLocalScan: Local rule engine is not implemented yet (Phase 2).');
+export async function runLocalScan(
+  diff: string,
+  options: LocalScanOptions = {},
+): Promise<LocalFinding[]> {
+  const rules = options.rules ?? DEFAULT_RULES;
+  const findings: LocalFinding[] = [];
+
+  for (const file of parseDiff(diff)) {
+    // Binary content cannot be matched line-wise, and git gives us no hunks for it.
+    if (file.isBinary) continue;
+
+    const applicable = rulesForFile(rules, file.path);
+    if (applicable.length === 0) continue;
+
+    for (const hunk of file.hunks) {
+      for (const line of hunk.lines) {
+        if (line.kind !== 'add' || line.newLine === null) continue;
+
+        for (const rule of applicable) {
+          // Patterns are non-global by contract (see the Rule interface), so
+          // exec() carries no lastIndex state between iterations.
+          const match = rule.pattern.exec(line.content);
+          if (match === null) continue;
+          if (rule.refine !== undefined && !rule.refine(line.content, match)) continue;
+
+          findings.push({
+            file: file.path,
+            line: line.newLine,
+            ruleId: rule.id,
+            severity: rule.severity,
+            message: rule.message,
+          });
+        }
+      }
+    }
+  }
+
+  return findings;
 }

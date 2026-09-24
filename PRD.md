@@ -166,6 +166,7 @@ Developers, especially students and solo/small-team developers, need something i
 | Config | `.codeguardrc.json` (per-project) + OS-level secure storage or `.env` for API key |
 | VS Code Extension | VS Code Extension API (Diagnostics + CodeAction providers) |
 | Patch Application | Diff/patch application via a library such as `diff` npm package |
+| Testing | Jest + `@swc/jest` (SWC transformer — ts-jest cannot run on TypeScript 7). Type safety is enforced as a separate step via `tsc --noEmit`, run by `npm test` before Jest |
 
 ### 9.2 High-Level Flow
 

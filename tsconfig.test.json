@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true
+  },
+  // The build config deliberately excludes *.test.ts so tests never land in
+  // dist/. That exclusion would also hide tests from `tsc --noEmit`, leaving
+  // them untype-checked — which matters here because @swc/jest strips types
+  // without checking them. This config re-includes everything so `npm run
+  // typecheck` (and `npm test`) genuinely cover the test files too.
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
