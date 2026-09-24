@@ -168,6 +168,35 @@ Developers, especially students and solo/small-team developers, need something i
 | Patch Application | Diff/patch application via a library such as `diff` npm package |
 | Testing | Jest + `@swc/jest` (SWC transformer — ts-jest cannot run on TypeScript 7). Type safety is enforced as a separate step via `tsc --noEmit`, run by `npm test` before Jest |
 
+#### 9.1.1 Package layout
+
+The original sketch in this section named only `src/prompts/`, `src/engine/local/`, `src/engine/remote/`, `src/hooks/` and `src/cli.ts`. Building it out showed that config parsing, Git plumbing and report rendering do not belong inside either `cli.ts` or `hooks/pre-commit.ts` — each of those two would have become a file with four unrelated reasons to change. They are separate modules, split by responsibility:
+
+```
+codeguard/
+├── .codeguardrc.json       this repo's own config — CodeGuard gates its own commits
+├── .husky/pre-commit       written by `codeguard install` (Husky detected, not required)
+├── src/
+│   ├── cli.ts              entry point: scan | install | patch | config
+│   ├── exit-codes.ts       0 ok · 1 error · 2 not-implemented · 3 blocked
+│   ├── severity.ts         severity ordering and a type guard
+│   ├── config/
+│   │   ├── schema.ts       .codeguardrc.json shape, defaults, validation, glob matching
+│   │   └── load.ts         reads the config; never throws
+│   ├── git/repo.ts         staged-diff capture, hook-path discovery
+│   ├── hooks/pre-commit.ts the check, the hook body, and the installer
+│   ├── prompts/            system prompts + structured-output types (shared with Remote Mode)
+│   ├── report/render.ts    human-readable findings, verdict and config warnings
+│   └── engine/
+│       ├── diff.ts         unified-diff parser — what both engines stand on
+│       ├── findings.ts     the finding shape both engines produce
+│       ├── threshold.ts    findings → blocking / warned / allowed
+│       ├── local/          FR-8: regex rule set over diff hunks (detection only)
+│       └── remote/         FR-3..FR-6: two-stage pipeline, provider client, redaction
+└── test-fixtures/          deliberately vulnerable mini-repo (Phase 6)
+```
+
+
 ### 9.2 High-Level Flow
 
 ```
