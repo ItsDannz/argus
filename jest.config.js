@@ -19,6 +19,9 @@ module.exports = {
   testEnvironment: 'node',
   roots: ['<rootDir>/src'],
   testMatch: ['**/*.test.ts'],
+  // Strips provider credentials from the environment before any test runs, so
+  // no test can reach the live API — see the file header for why this matters.
+  setupFiles: ['<rootDir>/jest.setup.ts'],
   transform: {
     '^.+\\.tsx?$': [
       '@swc/jest',

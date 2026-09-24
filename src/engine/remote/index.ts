@@ -1,33 +1,399 @@
 /**
- * Remote AI Mode — two-stage DeepSeek pipeline (FR-3..FR-6, PRD §6.1).
+ * Remote AI Mode — the two-stage pipeline (PRD §6.1, §9.2; FR-3..FR-6).
  *
- * Stage 1: triage the whole diff with reasoning OFF  -> ScanFinding[]
- * Stage 2: deep-analyse + patch only flagged hunks, reasoning ON -> PatchSuggestion[]
+ *   Stage 1  one request, reasoning OFF, over the whole diff
+ *            → `ScanFinding[]`: which hunks deserve a closer look
+ *   Stage 2  one request per flagged hunk, reasoning ON
+ *            → `PatchSuggestion`: confirm or reject, explain, and patch
  *
- * Phase 1 scaffold only. The live API integration lands in Phase 4, along with
- * the secret-redaction pass required by PRD §9.3 / NFR §8.
+ * The split is the cost design, not an architectural flourish. Stage 2 is the
+ * expensive call, and it only ever runs on hunks Stage 1 already flagged — so the
+ * cost of a scan scales with how much of the diff looks suspicious, not with how
+ * big the diff is.
+ *
+ * ─── What this module is responsible for ─────────────────────────────────────
+ * Ordering, redaction, budget, the cap, and assembling an honest result. It does
+ * no prompt authoring (prompts/security-agent-prompts.ts), no HTTP
+ * (remote/client.ts), no line arithmetic (remote/context.ts), and no output
+ * shaping (report/render.ts). That separation is what lets the whole pipeline be
+ * tested against a stub client with no network.
+ *
+ * ─── Which answer wins ───────────────────────────────────────────────────────
+ * Stage 1 over-reports by design: it is one cheap pass over everything, told to
+ * flag anything that might be a problem. Stage 2 exists to overrule it. So where
+ * Stage 2 answers about a hunk, its answer REPLACES Stage 1's findings for that
+ * hunk — including when that answer is "no, this is fine", which is the whole
+ * point of paying for a second call. Where Stage 2 never answered, Stage 1's
+ * finding stands on its own and still counts towards the commit threshold. Every
+ * one of those fallbacks is recorded in `notAnalysed` so the report can say which
+ * findings arrived without a patch.
+ *
+ * ─── Failure policy ──────────────────────────────────────────────────────────
+ * Stage 1 failing is fatal to Remote Mode: the caller falls back to Local
+ * (PRD §6.3). Without triage there is nothing at all to report, so there is no
+ * partial result worth salvaging.
+ *
+ * Stage 2 failing is NOT. The first failure stops the loop — a provider that just
+ * failed is likely to fail again, and grinding through the remaining hunks would
+ * spend the cap on timeouts — but the findings already gathered are kept. Every
+ * hunk still waiting is reported from triage, without a patch. Degrading all the
+ * way to Local would throw away real results to punish a partial outage.
  */
 
-import type { PatchSuggestion, ScanFinding } from '../../prompts/security-agent-prompts';
+import type { Category, PatchSuggestion, ScanFinding, Severity } from '../../prompts/security-agent-prompts';
+import {
+  buildPatchUserPrompt,
+  buildScanUserPrompt,
+  PATCH_SYSTEM_PROMPT,
+  SCAN_SYSTEM_PROMPT,
+} from '../../prompts/security-agent-prompts';
+import type { RemoteConfig } from '../../config/schema';
+import type { Finding } from '../findings';
+import { filterExcludedFiles, truncateToBudget } from './budget';
+import { createDeepSeekClient, type LlmClient } from './client';
+import { selectFlaggedHunks } from './context';
+import { parsePatchResponse, parseTriageResponse } from './parse';
+import { containsPlaceholder, redactDiff, type Redaction } from './redact';
 
-/**
- * Stage 1 — fast triage over the full diff.
- *
- * @param diff Unified diff. Callers must have already run the redaction pass.
- */
-export async function runRemoteScan(_diff: string): Promise<ScanFinding[]> {
-  throw new Error('runRemoteScan: Remote AI Mode is not implemented yet (Phase 4).');
+export type { LlmClient } from './client';
+export { LlmError } from './client';
+export { redactDiff } from './redact';
+
+/** A hunk that reached Stage 2, and whatever came back. */
+export interface DeepAnalysis {
+  file: string;
+  line: number;
+  severity: Severity;
+  category: Category;
+  explanation: string;
+  /** Unified diff, or '' when there is nothing applicable. */
+  patch: string;
+  confidence: PatchSuggestion['confidence'];
+  /** Why `patch` is empty, when it is. Null when a patch is present. */
+  withheld: string | null;
+  /** The transmitted hunk contained a redacted value. */
+  redacted: boolean;
+}
+
+export interface RemoteScanOutcome {
+  /** Findings that count towards the commit threshold. */
+  findings: Finding[];
+  /** Deep-analysed and rejected as false positives. Reported, never counted. */
+  dismissed: Finding[];
+  /**
+   * The subset of `findings` that arrived from Stage 1 with no patch attached,
+   * for any reason — beyond the cap, deep analysis failed, or the finding named
+   * a hunk that does not exist. Listed so the report can group them; not a
+   * separate set of problems.
+   */
+  notAnalysed: Finding[];
+  /** One entry per hunk that reached Stage 2 and produced a usable answer. */
+  analyses: DeepAnalysis[];
+  redactions: Redaction[];
+  /** Everything the user needs to know about what was skipped or truncated. */
+  notes: string[];
+  /** Requests actually made, so the cost of a scan can be stated plainly. */
+  requestCount: number;
+}
+
+export interface RemoteScanOptions {
+  /** Raw staged diff, unredacted. Redaction happens inside, always. */
+  diff: string;
+  /** `baseUrl` is set only when `CODEGUARD_BASE_URL` overrides the endpoint. */
+  credentials: { apiKey: string; model: string; baseUrl?: string };
+  remote: RemoteConfig;
+  /** `excludePaths` from the config; excluded files are never transmitted. */
+  exclude?: (filePath: string) => boolean;
+  /** Injectable for tests. Defaults to the live DeepSeek client. */
+  client?: LlmClient;
+  /** Progress feedback (NFR: "visible progress feedback"). Goes to stderr. */
+  onProgress?: (message: string) => void;
+  /** Cancels in-flight requests. Per-request timeouts are applied on top. */
+  signal?: AbortSignal;
+}
+
+/** Converts a model finding into the shape the threshold and renderer use. */
+function toFinding(finding: ScanFinding): Finding {
+  return {
+    file: finding.file,
+    line: finding.line_range[0],
+    // The category stands in for a rule id here. See engine/findings.ts.
+    ruleId: finding.category,
+    severity: finding.severity,
+    message: finding.summary,
+  };
 }
 
 /**
- * Stage 2 — deep analysis and patch generation for a single flagged finding.
+ * Combines the caller's signal with a per-request timeout.
  *
- * @param finding The triage-stage finding to confirm, reject, or patch.
- * @param hunk    The flagged hunk, plus optional surrounding context.
+ * Both are needed and they are not alternatives: the timeout bounds ONE slow
+ * request, and the external signal lets a caller abandon a scan already in
+ * progress. `AbortSignal.any` fires when either does.
  */
-export async function runRemotePatch(
-  _finding: ScanFinding,
-  _hunk: { hunk: string; surroundingContext?: string },
-): Promise<PatchSuggestion> {
-  throw new Error('runRemotePatch: Remote AI Mode is not implemented yet (Phase 4).');
+function requestSignal(external: AbortSignal | undefined, timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return external === undefined ? timeout : AbortSignal.any([external, timeout]);
+}
+
+/**
+ * The paths present in a diff, in the form the model was asked to quote them.
+ *
+ * Read back out of the text we actually transmitted, so an excluded file — which
+ * never reached the API — can never be named by a finding we accept.
+ */
+function pathsIn(diff: string): Set<string> {
+  const paths = new Set<string>();
+  for (const line of diff.split('\n')) {
+    if (!line.startsWith('+++ ')) continue;
+    const named = line.slice(4).trim().replace(/^[ab]\//, '');
+    if (named !== '/dev/null' && named !== '') paths.add(named);
+  }
+  return paths;
+}
+
+/**
+ * Runs the two-stage scan.
+ *
+ * @throws {LlmError} when Stage 1 could not be completed, or when triage came
+ *         back as something that is not JSON at all. The caller treats this as
+ *         the trigger to fall back to Local Mode (PRD §6.3).
+ */
+export async function runRemoteScan(options: RemoteScanOptions): Promise<RemoteScanOutcome> {
+  const notes: string[] = [];
+  const analyses: DeepAnalysis[] = [];
+  const dismissed: Finding[] = [];
+  const counted: Finding[] = [];
+  const notAnalysed: Finding[] = [];
+  let requestCount = 0;
+  // Dismissals are recorded per hunk (that is what Stage 2 reasons about), but
+  // reported per Stage-1 finding, so the count matches what triage produced.
+  let clearedFindings = 0;
+
+  const progress = options.onProgress ?? ((): void => {});
+  const client =
+    options.client ??
+    createDeepSeekClient({
+      apiKey: options.credentials.apiKey,
+      model: options.credentials.model,
+      ...(options.credentials.baseUrl === undefined ? {} : { baseUrl: options.credentials.baseUrl }),
+    });
+
+  const short = (findings: readonly ScanFinding[]): void => {
+    for (const finding of findings) {
+      const entry = toFinding(finding);
+      counted.push(entry);
+      notAnalysed.push(entry);
+    }
+  };
+
+  // --- Prepare the payload --------------------------------------------------
+  // Order matters. Exclude first, so code from an excluded path is never
+  // redacted, transmitted, or reasoned about. Redact second, so the budget is
+  // measured against what actually goes over the wire.
+  const filtered = filterExcludedFiles(options.diff, options.exclude ?? (() => false));
+  if (filtered.excluded.length > 0) {
+    notes.push(`Excluded by configuration, not sent to the API: ${filtered.excluded.join(', ')}.`);
+  }
+
+  const { diff: redacted, redactions } = redactDiff(filtered.diff);
+  if (redactions.length > 0) {
+    const files = [...new Set(redactions.map((entry) => entry.file).filter((name) => name !== ''))];
+    notes.push(
+      `Redacted ${redactions.length} secret-like ${redactions.length === 1 ? 'value' : 'values'} ` +
+        `before transmission${files.length > 0 ? ` (${files.join(', ')})` : ''}. The values were not sent.`,
+    );
+  }
+
+  const budgeted = truncateToBudget(redacted);
+  if (budgeted.omitted.length > 0) {
+    notes.push(
+      `The diff exceeded the triage budget, so these files were NOT analysed at all: ${budgeted.omitted.join(', ')}.`,
+    );
+  }
+  if (budgeted.empty) {
+    notes.push('Nothing in the diff fitted the triage budget, so no request was made.');
+    return { findings: counted, dismissed, notAnalysed, analyses, redactions, notes, requestCount };
+  }
+
+  // --- Stage 1: triage ------------------------------------------------------
+  progress(`CodeGuard: triaging the diff with ${client.model} (reasoning off)…`);
+  requestCount += 1;
+  const triageText = await client.complete(
+    {
+      system: SCAN_SYSTEM_PROMPT,
+      user: buildScanUserPrompt(budgeted.diff),
+      reasoning: false,
+    },
+    requestSignal(options.signal, options.remote.timeoutMs),
+  );
+
+  // Computed once: it is the set of paths the model was shown, and it does not
+  // change between Stage 1 and Stage 2.
+  const knownFiles = pathsIn(budgeted.diff);
+
+  const triage = parseTriageResponse(triageText, { knownFiles });
+  for (const reason of triage.rejected) notes.push(`Discarded a triage entry: ${reason}`);
+  progress(
+    `CodeGuard: triage flagged ${triage.value.length} ${triage.value.length === 1 ? 'issue' : 'issues'}.`,
+  );
+
+  // --- Stage 2: deep analysis ----------------------------------------------
+  const selection = selectFlaggedHunks(
+    budgeted.diff,
+    triage.value,
+    options.remote.maxDeepAnalysisHunks,
+  );
+
+  if (selection.unmatched.length > 0) {
+    const files = [...new Set(selection.unmatched.map((finding) => finding.file))];
+    notes.push(
+      `${selection.unmatched.length} triage ${selection.unmatched.length === 1 ? 'finding' : 'findings'} ` +
+        `could not be matched to a hunk in the diff (${files.join(', ')}), so ` +
+        `${selection.unmatched.length === 1 ? 'it was' : 'they were'} reported without a patch.`,
+    );
+    short(selection.unmatched);
+  }
+
+  if (selection.beyondCap.length > 0) {
+    const files = [...new Set(selection.beyondCap.map((hunk) => hunk.file))];
+    const limit = options.remote.maxDeepAnalysisHunks;
+    notes.push(
+      `Reached the limit of ${limit} deep-analysis ${limit === 1 ? 'hunk' : 'hunks'}; ` +
+        `${selection.beyondCap.length} more ${selection.beyondCap.length === 1 ? 'hunk was' : 'hunks were'} ` +
+        `reported without a patch (${files.join(', ')}). Raise remote.maxDeepAnalysisHunks to cover them.`,
+    );
+    for (const hunk of selection.beyondCap) short(hunk.findings);
+  }
+
+  for (const [index, hunk] of selection.selected.entries()) {
+    const headline = hunk.findings[0];
+    const line = headline?.line_range[0] ?? 1;
+    progress(
+      `CodeGuard: analysing hunk ${index + 1}/${selection.selected.length} ` +
+        `(${hunk.file}:${line}, reasoning on)…`,
+    );
+
+    let text: string;
+    requestCount += 1;
+    try {
+      text = await client.complete(
+        {
+          system: PATCH_SYSTEM_PROMPT,
+          user: buildPatchUserPrompt({
+            file: hunk.file,
+            flaggedSummary: headline?.summary ?? '',
+            category: headline?.category ?? 'other',
+            hunk: hunk.text,
+            // No surrounding file content is passed, deliberately. FR-4 scopes
+            // Remote Mode to the diff, and the only other source of context is
+            // the working tree — sending code the developer did not stage is
+            // exactly the exposure the diff-only rule exists to prevent. The
+            // hunk already carries git's own three lines of context either side.
+          }),
+          reasoning: true,
+        },
+        requestSignal(options.signal, options.remote.timeoutMs),
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      notes.push(
+        `Deep analysis stopped after ${analyses.length} of ${selection.selected.length} hunks — ${message}. ` +
+          'The remaining hunks are reported from triage alone, without patches.',
+      );
+      // This hunk and every one after it. `slice(index)` includes the failure.
+      for (const remaining of selection.selected.slice(index)) short(remaining.findings);
+      break;
+    }
+
+    let suggestion: PatchSuggestion | null;
+    try {
+      const parsed = parsePatchResponse(text, knownFiles);
+      for (const reason of parsed.rejected) notes.push(`Discarded a deep-analysis entry: ${reason}`);
+      suggestion = parsed.value;
+    } catch (error) {
+      // A non-JSON answer for one hunk is that hunk's problem, not the scan's.
+      const message = error instanceof Error ? error.message : String(error);
+      notes.push(`Deep analysis of ${hunk.file} returned something unusable — ${message}`);
+      short(hunk.findings);
+      continue;
+    }
+
+    if (suggestion === null) {
+      short(hunk.findings);
+      continue;
+    }
+
+    // Stage 2 was asked about ONE file. An answer naming a different one is not
+    // an answer to that question, and accepting it would attribute a finding to
+    // code the model was never shown — a `src/run.js` finding silently rewritten
+    // as a `src/db.js` one, with a patch to match. `knownFiles` cannot catch
+    // this, because the other file really is in the diff; only this comparison
+    // can. The hunk keeps its Stage-1 finding and loses its patch.
+    if (suggestion.file !== hunk.file) {
+      notes.push(
+        `Deep analysis of ${hunk.file} answered about ${suggestion.file} instead, so it was ` +
+          `discarded and ${hunk.file} is reported without a patch.`,
+      );
+      short(hunk.findings);
+      continue;
+    }
+
+    // An empty patch is the documented false-positive signal (PATCH_SYSTEM_PROMPT).
+    // It is the one outcome that removes a finding from the count, and it is why
+    // Stage 2 exists: Stage 1 flags anything that might be a problem, and a
+    // finding that survives triage but not deep analysis is noise the threshold
+    // should never see.
+    if (suggestion.suggested_patch === '') {
+      clearedFindings += hunk.findings.length;
+      dismissed.push({
+        file: suggestion.file,
+        line,
+        ruleId: suggestion.category,
+        severity: suggestion.severity,
+        message: suggestion.explanation,
+      });
+      continue;
+    }
+
+    // The fail-safe for a patch that quotes a line we redacted. Applying it would
+    // write `«REDACTED:...»` into the developer's file, so the patch text is
+    // withheld from the report entirely rather than shown and left to be copied.
+    // The explanation and severity survive, so the finding is still actionable —
+    // just not automatically fixable.
+    const withheld = containsPlaceholder(suggestion.suggested_patch)
+      ? 'The suggested patch quotes a value that CodeGuard redacted before sending, so it cannot be applied. Fix this one by hand.'
+      : null;
+
+    analyses.push({
+      file: suggestion.file,
+      line,
+      severity: suggestion.severity,
+      category: suggestion.category,
+      explanation: suggestion.explanation,
+      patch: withheld === null ? suggestion.suggested_patch : '',
+      confidence: suggestion.confidence,
+      withheld,
+      redacted: hunk.redacted,
+    });
+
+    counted.push({
+      file: suggestion.file,
+      line,
+      ruleId: suggestion.category,
+      severity: suggestion.severity,
+      message: suggestion.explanation,
+    });
+  }
+
+  if (dismissed.length > 0) {
+    const one = clearedFindings === 1;
+    notes.push(
+      `Deep analysis cleared ${clearedFindings} triage ${one ? 'finding' : 'findings'} as ` +
+        `${one ? 'a false positive' : 'false positives'}; ${one ? 'it is' : 'they are'} shown below ` +
+        'but do not count towards the threshold.',
+    );
+  }
+
+  return { findings: counted, dismissed, notAnalysed, analyses, redactions, notes, requestCount };
 }

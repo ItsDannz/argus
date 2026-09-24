@@ -22,6 +22,7 @@ import { Command } from 'commander';
 
 import { CONFIG_FILENAME, cloneConfig, DEFAULT_CONFIG } from './config/schema';
 import { loadConfig } from './config/load';
+import { decideMode, loadEnvironment } from './engine/mode';
 import { EXIT } from './exit-codes';
 import { findRepoRoot } from './git/repo';
 import { installPreCommitHook, runPreCommitCheck, scanDiff } from './hooks/pre-commit';
@@ -94,15 +95,12 @@ program
   .option('--local', 'force Local Static Engine Mode (rule-based, no API key needed)')
   .option('--remote', 'force Remote AI Mode (requires DEEPSEEK_API_KEY)')
   .option('--no-color', 'disable colour in output')
-  .action(async (options: { diff?: string; remote?: boolean; color?: boolean }) => {
+  .action(async (options: { diff?: string; local?: boolean; remote?: boolean; color?: boolean }) => {
     const useColor = colorEnabled(options.color);
-
-    // Remote Mode arrives in Phase 4. Reported rather than ignored, because a
-    // silently-local scan would look like the AI check the user asked for.
-    if (options.remote === true) {
-      notImplemented('scan --remote', 4);
-      return;
-    }
+    const mode = {
+      ...(options.local === undefined ? {} : { local: options.local }),
+      ...(options.remote === undefined ? {} : { remote: options.remote }),
+    };
 
     if (options.diff !== undefined) {
       const diff = options.diff === '-' ? await readStdin() : await readFile(options.diff, 'utf8');
@@ -110,12 +108,13 @@ program
         diff,
         repoRoot: await resolveRepoRoot(process.cwd()),
         useColor,
+        ...mode,
       });
       process.exitCode = result.exitCode;
       return;
     }
 
-    const result = await runPreCommitCheck({ useColor });
+    const result = await runPreCommitCheck({ useColor, ...mode });
     process.exitCode = result.exitCode;
   });
 
@@ -219,15 +218,38 @@ program
     }
 
     const loaded = await loadConfig(repoRoot);
+    const environment = await loadEnvironment(repoRoot);
+    const mode = decideMode({
+      environment,
+      ...(loaded.config.model === undefined ? {} : { configModel: loaded.config.model }),
+    });
+
+    // The mode is reported rather than left to be inferred from whether an API
+    // key happens to be exported. "Why did my commit just make a network call?"
+    // is a question this line answers before it is asked.
+    const modeLine =
+      mode.kind === 'remote'
+        ? `remote AI (${mode.credentials.model})`
+        : mode.kind === 'local'
+          ? 'local rule engine'
+          : 'error — see below';
+
     const lines = [
       'CodeGuard configuration',
       `  config file    ${loaded.path ?? 'none — using defaults'}`,
       `  block on       ${loaded.config.threshold.blockOn}`,
       `  warn on        ${loaded.config.threshold.warnOn}`,
       `  exclude paths  ${loaded.config.excludePaths.length > 0 ? loaded.config.excludePaths.join(', ') : 'none'}`,
-      `  model          ${loaded.config.model ?? 'default (Phase 4)'}`,
+      `  model          ${loaded.config.model ?? 'the built-in default'}`,
+      `  mode           ${modeLine}`,
+      `  deep hunks     up to ${loaded.config.remote.maxDeepAnalysisHunks} per scan`,
     ];
     process.stdout.write(`${lines.join('\n')}\n`);
+
+    if (mode.kind === 'error') {
+      process.stderr.write(`\nCodeGuard: ${mode.message}\n`);
+      process.exitCode = EXIT.ERROR;
+    }
 
     const warning = renderConfigProblems(loaded.problems, loaded.path, { useColor: colorEnabled(undefined) });
     if (warning !== '') process.stderr.write(`\n${warning}\n`);

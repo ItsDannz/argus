@@ -33,13 +33,19 @@ import {
 import { cloneConfig, DEFAULT_CONFIG } from '../config/schema';
 import type { LocalFinding } from '../engine/local/types';
 import { runLocalScan } from '../engine/local';
+import { decideMode, loadEnvironment, type Environment } from '../engine/mode';
+import { redactApiKey } from '../engine/remote/redact';
+import { runRemoteScan, type DeepAnalysis, type LlmClient } from '../engine/remote';
 import { evaluateThreshold, type ThresholdDecision } from '../engine/threshold';
 import { EXIT } from '../exit-codes';
 import { findRepoRoot, getStagedDiff, locatePreCommitHook, type HookMechanism } from '../git/repo';
 import {
   renderConfigProblems,
   renderFindingsReport,
+  renderNotes,
+  renderRemoteExtras,
   renderVerdict,
+  type EngineName,
   type RenderOptions,
 } from '../report/render';
 
@@ -70,6 +76,14 @@ export interface ScanResult {
   config: CodeGuardConfig;
   configPath: string | null;
   configProblems: ConfigProblem[];
+  /** Which engine actually produced `findings` — not which one was requested. */
+  engine: EngineName;
+  /** Operational notes: exclusions, redactions, truncation, fallbacks. */
+  notes: string[];
+  /** Remote only: findings deep analysis cleared as false positives. */
+  dismissed: LocalFinding[];
+  /** Remote only: per-hunk deep analysis, including any suggested patch. */
+  analyses: DeepAnalysis[];
 }
 
 export interface ScanIo {
@@ -83,6 +97,24 @@ export interface ScanIo {
 export interface ScanDiffOptions extends ScanIo {
   diff: string;
   repoRoot: string;
+  /** Force the rule-based engine. */
+  local?: boolean;
+  /** Force the AI engine. An error if no key is available, never a fallback. */
+  remote?: boolean;
+  /**
+   * Overrides the detected environment.
+   *
+   * The seam that makes remote-mode behaviour testable without a network, an
+   * API key, or a scratch checkout containing a `.env`. Production never passes
+   * this; the environment is read from the repository being committed to.
+   */
+  environment?: Environment;
+  /**
+   * Overrides the AI provider. Stubbed in tests so a scan under test never
+   * reaches the network — and so a failure can be induced on demand, which is
+   * the only way to exercise the fallback deterministically.
+   */
+  client?: LlmClient;
 }
 
 function resolveIo(io: ScanIo): { write: (text: string) => void; writeError: (text: string) => void; render: RenderOptions } {
@@ -101,6 +133,21 @@ function resolveIo(io: ScanIo): { write: (text: string) => void; writeError: (te
  * what makes the whole reporting and threshold path testable without shelling
  * out to Git.
  *
+ * ─── Mode selection, and the one fallback that exists ────────────────────────
+ * `decideMode` chooses the engine (FR-3). There are exactly two ways Remote Mode
+ * ends up not being used:
+ *
+ *   - `--remote` with no key. An ERROR, not a fallback. The developer asked for
+ *     an AI scan; quietly giving them a regex scan while the flag implied
+ *     otherwise is a lie about what ran.
+ *   - A keyless default, or a configured key that fails at runtime. A fallback,
+ *     with a loud warning, because the alternative is blocking a commit over a
+ *     network blip (PRD §6.3, §8).
+ *
+ * Falling back from a FAILED remote call keeps the run alive but must never look
+ * like a successful remote scan, so the warning says plainly that the AI check
+ * did not run and the header names the local engine.
+ *
  * Never throws, and never blocks on anything except a real finding.
  */
 export async function scanDiff(options: ScanDiffOptions): Promise<ScanResult> {
@@ -109,6 +156,97 @@ export async function scanDiff(options: ScanDiffOptions): Promise<ScanResult> {
 
   const configWarning = renderConfigProblems(loaded.problems, loaded.path, render);
   if (configWarning !== '') writeError(`${configWarning}\n\n`);
+
+  const environment = options.environment ?? (await loadEnvironment(options.repoRoot));
+  const mode = decideMode({
+    ...(options.local === undefined ? {} : { local: options.local }),
+    ...(options.remote === undefined ? {} : { remote: options.remote }),
+    environment,
+    ...(loaded.config.model === undefined ? {} : { configModel: loaded.config.model }),
+  });
+
+  if (mode.kind === 'error') {
+    // A request CodeGuard cannot honour. Exit ERROR, not BLOCKED: nothing was
+    // found, so reporting a security block would be false.
+    writeError(`CodeGuard: ${mode.message}\n`);
+    return {
+      exitCode: EXIT.ERROR,
+      findings: [],
+      decision: evaluateThreshold([], loaded.config.threshold),
+      config: loaded.config,
+      configPath: loaded.path,
+      configProblems: loaded.problems,
+      engine: 'local',
+      notes: [mode.message],
+      dismissed: [],
+      analyses: [],
+    };
+  }
+
+  const notes: string[] = [];
+
+  if (mode.kind === 'remote') {
+    try {
+      const outcome = await runRemoteScan({
+        diff: options.diff,
+        credentials: mode.credentials,
+        remote: loaded.config.remote,
+        exclude: loaded.isExcluded,
+        // Progress goes to stderr: stdout is the report, and a report with
+        // status lines mixed into it is not parseable.
+        onProgress: (message) => writeError(`${message}\n`),
+        ...(options.client === undefined ? {} : { client: options.client }),
+      });
+
+      const decision = evaluateThreshold(outcome.findings, loaded.config.threshold);
+      const remoteRender: RenderOptions = { ...render, engine: 'remote' };
+
+      write(`${renderFindingsReport(outcome.findings, remoteRender)}\n`);
+      const extras = renderRemoteExtras(outcome, render);
+      if (extras !== '') write(`\n${extras}\n`);
+      if (outcome.findings.length > 0) {
+        const { blockOn, warnOn } = loaded.config.threshold;
+        write(`\n${renderVerdict(decision, blockOn, warnOn, render)}\n`);
+      }
+
+      const noteBlock = renderNotes(outcome.notes, render);
+      if (noteBlock !== '') writeError(`${noteBlock}\n`);
+
+      return {
+        exitCode: decision.blocking.length > 0 ? EXIT.BLOCKED : EXIT.OK,
+        findings: outcome.findings,
+        decision,
+        config: loaded.config,
+        configPath: loaded.path,
+        configProblems: loaded.problems,
+        engine: 'remote',
+        notes: outcome.notes,
+        dismissed: outcome.dismissed,
+        analyses: outcome.analyses,
+      };
+    } catch (error) {
+      // Redacted here as well as inside the client. The client already strips
+      // the key from its own messages, but this is the last point before an
+      // arbitrary provider string reaches the terminal, and FR-10 is the one
+      // requirement in this project where a single component getting it wrong is
+      // irreversible — the key would be in the user's scrollback and their CI
+      // log. Two independent guards is the right number for that.
+      const message = redactApiKey(
+        error instanceof Error ? error.message : String(error),
+        mode.credentials.apiKey,
+      );
+      writeError(
+        [
+          '[CODEGUARD] Remote AI Mode failed, so the AI check DID NOT RUN.',
+          `  ${message}`,
+          '  Falling back to the local rule engine. The results below come from regex rules only —',
+          '  a clean scan here does not mean the AI pass found nothing.',
+          '',
+        ].join('\n'),
+      );
+      notes.push(`Remote AI Mode failed and CodeGuard fell back to Local Mode: ${message}`);
+    }
+  }
 
   const findings = await runLocalScan(options.diff, { exclude: loaded.isExcluded });
   const decision = evaluateThreshold(findings, loaded.config.threshold);
@@ -126,12 +264,20 @@ export async function scanDiff(options: ScanDiffOptions): Promise<ScanResult> {
     config: loaded.config,
     configPath: loaded.path,
     configProblems: loaded.problems,
+    engine: 'local',
+    notes,
+    dismissed: [],
+    analyses: [],
   };
 }
 
 export interface PreCommitOptions extends ScanIo {
   /** Directory the hook was invoked from. Defaults to the process cwd. */
   cwd?: string;
+  /** Force Local Mode. */
+  local?: boolean;
+  /** Force Remote Mode (an error, not a fallback, without a key). */
+  remote?: boolean;
 }
 
 /**
@@ -165,6 +311,10 @@ export async function runPreCommitCheck(options: PreCommitOptions = {}): Promise
     config: cloneConfig(DEFAULT_CONFIG),
     configPath: null,
     configProblems: [],
+    engine: 'local',
+    notes: [],
+    dismissed: [],
+    analyses: [],
   });
 
   const internalError = (error: unknown): ScanResult => {

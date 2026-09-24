@@ -3,6 +3,10 @@
     "blockOn": "Critical",
     "warnOn": "High"
   },
+  "remote": {
+    "maxDeepAnalysisHunks": 5,
+    "timeoutMs": 60000
+  },
   "excludePaths": [
     "src/engine/local/rules.ts",
     "test-fixtures/**",

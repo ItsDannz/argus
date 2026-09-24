@@ -26,6 +26,9 @@ describe('validateConfig', () => {
     expect(config).toEqual({
       threshold: { blockOn: 'High', warnOn: 'Medium' },
       excludePaths: ['dist/**'],
+      // Absent from the file, so filled from the defaults — a config written
+      // before `remote` existed still has to produce the full shape.
+      remote: { maxDeepAnalysisHunks: 5, timeoutMs: 60_000 },
       model: 'deepseek-v4.1-flash',
     });
   });
@@ -94,6 +97,7 @@ describe('cloneConfig', () => {
     const source: CodeGuardConfig = {
       threshold: { blockOn: 'High', warnOn: 'Medium' },
       excludePaths: ['dist/**'],
+      remote: { maxDeepAnalysisHunks: 3, timeoutMs: 1_000 },
       model: 'm',
     };
     const copy = cloneConfig(source);
@@ -101,12 +105,17 @@ describe('cloneConfig', () => {
     expect(copy).not.toBe(source);
     expect(copy.threshold).not.toBe(source.threshold);
     expect(copy.excludePaths).not.toBe(source.excludePaths);
+    expect(copy.remote).not.toBe(source.remote);
   });
 
   it('omits model entirely when the source has none', () => {
-    expect('model' in cloneConfig({ threshold: { blockOn: 'Critical', warnOn: 'High' }, excludePaths: [] })).toBe(
-      false,
-    );
+    const copy = cloneConfig({
+      threshold: { blockOn: 'Critical', warnOn: 'High' },
+      excludePaths: [],
+      remote: { maxDeepAnalysisHunks: 5, timeoutMs: 60_000 },
+    });
+
+    expect('model' in copy).toBe(false);
   });
 
   it('does not let a caller mutate the shared defaults', () => {

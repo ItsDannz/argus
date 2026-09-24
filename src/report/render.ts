@@ -44,7 +44,23 @@ const WRAP_WIDTH = 76;
 export interface RenderOptions {
   /** Wrap labels in ANSI colour. Caller must check TTY and NO_COLOR. */
   useColor?: boolean;
+  /**
+   * Which engine produced the findings, named in the report header.
+   *
+   * Worth stating because the two modes give different guarantees: Local Mode is
+   * detection-only and can never have produced a patch, and Remote Mode may have
+   * declined to analyse part of the diff. A reader who does not know which one
+   * ran cannot know how much of the report to trust. Defaults to local.
+   */
+  engine?: EngineName;
 }
+
+export type EngineName = 'local' | 'remote';
+
+const ENGINE_LABEL: Record<EngineName, string> = {
+  local: 'local engine',
+  remote: 'remote AI engine',
+};
 
 /** No-op when colour is off, so call sites never need to branch. */
 function makePainter(options: RenderOptions): (text: string, colour: string) => string {
@@ -146,13 +162,111 @@ export function renderFindingsReport(
   options: RenderOptions = {},
 ): string {
   const paint = makePainter(options);
+  const engine = ENGINE_LABEL[options.engine ?? 'local'];
   if (findings.length === 0) {
-    return paint('CodeGuard (local engine): no issues found in the staged changes.', ANSI.green);
+    return paint(`CodeGuard (${engine}): no issues found in the staged changes.`, ANSI.green);
   }
 
   const fileCount = groupByFile(findings).size;
-  const header = `CodeGuard (local engine): ${plural(findings.length, 'issue')} in ${plural(fileCount, 'file')}`;
+  const header = `CodeGuard (${engine}): ${plural(findings.length, 'issue')} in ${plural(fileCount, 'file')}`;
   return `${header}\n\n${renderFindings(findings, options)}`;
+}
+
+/**
+ * Operational notes from a remote scan — exclusions, redactions, truncation,
+ * the hunk cap, a partial outage.
+ *
+ * Goes to stderr, for the same reason the config warning does: it is about how
+ * the scan ran rather than about the code, and it must not pollute a report that
+ * someone might be parsing. The `[CODEGUARD]` marker is plain text so it keeps
+ * its shape with `--no-color`.
+ *
+ * Every note is phrased as a statement of what CodeGuard did NOT do, because
+ * that is the only thing here a developer cannot infer from the findings list.
+ * An empty result and a truncated result look identical otherwise.
+ */
+export function renderNotes(notes: readonly string[], options: RenderOptions = {}): string {
+  if (notes.length === 0) return '';
+  const paint = makePainter(options);
+  return [
+    paint('[CODEGUARD]', ANSI.yellow),
+    ...notes.map((note) => `  - ${note}`),
+  ].join('\n');
+}
+
+/**
+ * The false positives a remote scan cleared, and the patches it proposed.
+ *
+ * Both are printed BELOW the findings and outside the verdict, because neither
+ * one affects the commit decision: a cleared finding does not count towards the
+ * threshold, and a patch that has not been applied fixes nothing. Printing
+ * either one above the verdict would imply a weight it does not have.
+ *
+ * The `extra` argument is shape-compatible with the remote engine's result but
+ * declared structurally, so this module keeps no runtime dependency on it.
+ */
+export function renderRemoteExtras(
+  extra: {
+    dismissed: readonly LocalFinding[];
+    analyses: readonly {
+      file: string;
+      line: number;
+      confidence: string;
+      patch: string;
+      withheld: string | null;
+    }[];
+  },
+  options: RenderOptions = {},
+): string {
+  const paint = makePainter(options);
+  const blocks: string[] = [];
+
+  if (extra.dismissed.length > 0) {
+    const rows = extra.dismissed.map((finding) =>
+      [`    ${String(finding.line).padStart(5)}  ${finding.ruleId}`, wrap(finding.message, MESSAGE_INDENT)].join(
+        '\n',
+      ),
+    );
+    blocks.push(
+      [
+        paint(
+          `Cleared as false positives by deep analysis (${plural(extra.dismissed.length, 'finding')}, not counted):`,
+          ANSI.dim,
+        ),
+        '',
+        rows.join('\n\n'),
+      ].join('\n'),
+    );
+  }
+
+  const patches = extra.analyses.filter((analysis) => analysis.patch !== '' || analysis.withheld !== null);
+  if (patches.length > 0) {
+    const rows = patches.map((analysis) => {
+      const heading = `    ${analysis.file}:${analysis.line}  (confidence: ${analysis.confidence})`;
+      if (analysis.patch === '') {
+        // A patch exists but cannot be shown — the redaction fail-safe. Saying
+        // why is the difference between "the model had no fix" and "there is a
+        // fix you will have to write yourself".
+        return `${heading}\n${wrap(analysis.withheld ?? '', MESSAGE_INDENT)}`;
+      }
+      return `${heading}\n${analysis.patch
+        .split('\n')
+        .map((line) => `${MESSAGE_INDENT}${line}`)
+        .join('\n')}`;
+    });
+    blocks.push(
+      [
+        paint(
+          `Suggested ${plural(patches.length, 'patch', 'patches')} — review and apply (nothing is changed yet):`,
+          ANSI.bold,
+        ),
+        '',
+        rows.join('\n\n'),
+      ].join('\n'),
+    );
+  }
+
+  return blocks.join('\n\n');
 }
 
 /**
