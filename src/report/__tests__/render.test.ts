@@ -14,6 +14,7 @@ function finding(over: Partial<LocalFinding> = {}): LocalFinding {
   return {
     file: 'src/db.js',
     line: 12,
+    category: 'sql_injection',
     ruleId: 'sql-string-concatenation',
     severity: 'Critical',
     message: 'SQL assembled with string concatenation.',

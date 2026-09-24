@@ -15,13 +15,31 @@
  * auto-patching out of scope for Local Mode.
  */
 
-import type { Severity } from '../prompts/security-agent-prompts';
+import type { Category, Severity } from '../prompts/security-agent-prompts';
 
 export interface Finding {
   /** Path as it appears in the diff (no leading "a/" or "b/"). */
   file: string;
   /** 1-based line number in the new version of the file. */
   line: number;
+  /**
+   * The vulnerability CLASS, from the shared `Category` vocabulary — the one
+   * field both engines can be compared in.
+   *
+   * This is the coarse bucket ("sql_injection"), not the detector
+   * ("sql-string-concatenation"). Local Mode fills it in from the rule that
+   * matched; Remote Mode fills it in from the model's answer. `ruleId` below is
+   * the specific identifier, and only Local Mode really has one — Remote Mode
+   * reuses the category there because a model does not name its own rules.
+   *
+   * It exists because of `engine/reconcile.ts`. Remote Mode is held to a severity
+   * floor set by the rule engine, and the floor can only be computed by a piece
+   * of code that can tell that a local `sql-string-concatenation` match and a
+   * remote `sql_injection` triage entry are two answers to the same question.
+   * Without this field that code would have to carry a rule-id → category table
+   * and would quietly stop working for any rule not in it.
+   */
+  category: Category;
   /**
    * Local Mode: the rule id, e.g. "hardcoded-secret". Remote Mode: the
    * vulnerability category from the model, e.g. "sql_injection". Both are short

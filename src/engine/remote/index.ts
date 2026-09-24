@@ -19,14 +19,22 @@
  * tested against a stub client with no network.
  *
  * ─── Which answer wins ───────────────────────────────────────────────────────
- * Stage 1 over-reports by design: it is one cheap pass over everything, told to
- * flag anything that might be a problem. Stage 2 exists to overrule it. So where
- * Stage 2 answers about a hunk, its answer REPLACES Stage 1's findings for that
- * hunk — including when that answer is "no, this is fine", which is the whole
- * point of paying for a second call. Where Stage 2 never answered, Stage 1's
- * finding stands on its own and still counts towards the commit threshold. Every
- * one of those fallbacks is recorded in `notAnalysed` so the report can say which
- * findings arrived without a patch.
+ * Between the model's two stages: Stage 1 over-reports by design, being one cheap
+ * pass over everything and told to flag anything that might be a problem. Stage 2
+ * exists to overrule it. So where Stage 2 answers about a hunk, its answer
+ * REPLACES Stage 1's findings for that hunk — including when that answer is "no,
+ * this is fine", which is the whole point of paying for a second call. Where
+ * Stage 2 never answered, Stage 1's finding stands on its own and still counts
+ * towards the commit threshold. Every one of those fallbacks is recorded in
+ * `notAnalysed` so the report can say which findings arrived without a patch.
+ *
+ * Between the model and the rule engine there is no such competition, and that
+ * asymmetry is deliberate. The model's judgement replaces the model's own earlier
+ * judgement; it does not get to undercut a deterministic one. `options.baseline`
+ * carries the rule engine's result for the same diff, and `reconcile` floors the
+ * final severities on it — raising, adding, and overruling dismissals, never
+ * lowering. The reason is in engine/reconcile.ts: which engine is configured must
+ * not decide whether a known-bad commit is stopped.
  *
  * ─── Failure policy ──────────────────────────────────────────────────────────
  * Stage 1 failing is fatal to Remote Mode: the caller falls back to Local
@@ -48,6 +56,7 @@ import {
   SCAN_SYSTEM_PROMPT,
 } from '../../prompts/security-agent-prompts';
 import type { Finding } from '../findings';
+import { reconcileWithBaseline } from '../reconcile';
 import { filterExcludedFiles, truncateToBudget } from './budget';
 import { createDeepSeekClient, type LlmClient } from './client';
 import { selectFlaggedHunks } from './context';
@@ -80,10 +89,10 @@ export interface RemoteScanOutcome {
   /** Deep-analysed and rejected as false positives. Reported, never counted. */
   dismissed: Finding[];
   /**
-   * The subset of `findings` that arrived from Stage 1 with no patch attached,
-   * for any reason — beyond the cap, deep analysis failed, or the finding named
-   * a hunk that does not exist. Listed so the report can group them; not a
-   * separate set of problems.
+   * The subset of `findings` that counts without a patch attached, for any
+   * reason — beyond the cap, deep analysis failed, the finding named a hunk that
+   * does not exist, or the rule engine reported it and triage did not. Listed so
+   * the report can group them; not a separate set of problems.
    */
   notAnalysed: Finding[];
   /** One entry per hunk that reached Stage 2 and produced a usable answer. */
@@ -117,6 +126,22 @@ export interface RemoteScanOptions {
   remote: RemoteBudget;
   /** `excludePaths` from the config; excluded files are never transmitted. */
   exclude?: (filePath: string) => boolean;
+  /**
+   * The deterministic rule-engine result for the same diff — Remote Mode's floor.
+   *
+   * Stage 2 is a probabilistic judgement, and on its own it was allowed to come
+   * out BELOW what a regex match had already established for a class of bug with
+   * an unambiguous signature: a critical SQL injection triaged as High, which
+   * warns instead of blocking. Passing the baseline in lets `reconcile` raise a
+   * severity to the rule engine's, add what the rules found and the model did
+   * not, and overrule a deep-analysis dismissal of a confident rule match. See
+   * engine/reconcile.ts for the policy and its limits.
+   *
+   * Taken as data rather than run here so this module still knows nothing about
+   * the Local engine, and so the caller can run the rules once and reuse the
+   * result if it has to fall back to Local Mode.
+   */
+  baseline?: readonly Finding[];
   /** Injectable for tests. Defaults to the live DeepSeek client. */
   client?: LlmClient;
   /** Progress feedback (NFR: "visible progress feedback"). Goes to stderr. */
@@ -130,6 +155,7 @@ function toFinding(finding: ScanFinding): Finding {
   return {
     file: finding.file,
     line: finding.line_range[0],
+    category: finding.category,
     // The category stands in for a rule id here. See engine/findings.ts.
     ruleId: finding.category,
     severity: finding.severity,
@@ -224,9 +250,41 @@ export async function runRemoteScan(options: RemoteScanOptions): Promise<RemoteS
       `The diff exceeded the triage budget, so these files were NOT analysed at all: ${budgeted.omitted.join(', ')}.`,
     );
   }
+
+  /**
+   * Assembles the result, applying the rule engine's floor on the way out.
+   *
+   * Every exit from this function goes through here, including the one below for
+   * a diff that fitted no budget — that path made no request, but the rules ran
+   * anyway, and "nothing fitted the budget" must not be able to mean "nothing
+   * found" when the deterministic engine found something.
+   */
+  const finish = (): RemoteScanOutcome => {
+    const reconciled = reconcileWithBaseline({
+      counted,
+      dismissed,
+      baseline: options.baseline ?? [],
+    });
+    for (const note of reconciled.notes) notes.push(note);
+
+    // A reinstated finding never reached Stage 2, so it is unpatched for the same
+    // reason a capped or unmatched one is.
+    for (const finding of reconciled.reinstated) notAnalysed.push(finding);
+
+    return {
+      findings: reconciled.counted,
+      dismissed: reconciled.dismissed,
+      notAnalysed,
+      analyses,
+      redactions,
+      notes,
+      requestCount,
+    };
+  };
+
   if (budgeted.empty) {
     notes.push('Nothing in the diff fitted the triage budget, so no request was made.');
-    return { findings: counted, dismissed, notAnalysed, analyses, redactions, notes, requestCount };
+    return finish();
   }
 
   // --- Stage 1: triage ------------------------------------------------------
@@ -362,6 +420,7 @@ export async function runRemoteScan(options: RemoteScanOptions): Promise<RemoteS
       dismissed.push({
         file: suggestion.file,
         line,
+        category: suggestion.category,
         ruleId: suggestion.category,
         severity: suggestion.severity,
         message: suggestion.explanation,
@@ -393,6 +452,7 @@ export async function runRemoteScan(options: RemoteScanOptions): Promise<RemoteS
     counted.push({
       file: suggestion.file,
       line,
+      category: suggestion.category,
       ruleId: suggestion.category,
       severity: suggestion.severity,
       message: suggestion.explanation,
@@ -408,5 +468,5 @@ export async function runRemoteScan(options: RemoteScanOptions): Promise<RemoteS
     );
   }
 
-  return { findings: counted, dismissed, notAnalysed, analyses, redactions, notes, requestCount };
+  return finish();
 }

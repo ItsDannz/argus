@@ -16,6 +16,7 @@ import { describe, expect, it } from '@jest/globals';
 
 import type { Environment } from '../../engine/mode';
 import { API_KEY_VAR } from '../../engine/mode';
+import { diffForFixture } from '../../engine/local/__tests__/helpers';
 import { LlmError, type LlmClient } from '../../engine/remote';
 import type { LlmRequest } from '../../engine/remote/client';
 import { EXIT } from '../../exit-codes';
@@ -252,8 +253,18 @@ describe('scanDiff — Remote Mode', () => {
     });
 
     expect(err()).toContain('Redacted');
-    expect(out()).toContain('no issues found');
     expect(out()).not.toContain('Redacted');
+
+    // This assertion used to be `out()).toContain('no issues found')`. Stubbed
+    // triage reports nothing, and Remote Mode previously had no way to see the
+    // credential on that line at all — the rules that match it only ran when
+    // Local Mode was selected. Now the rule engine's result is reconciled into
+    // every remote scan, so the report carries the finding triage missed, and the
+    // note explaining that stays on stderr with the rest of the operational
+    // output. Both halves are what this test is about.
+    expect(out()).toContain('CodeGuard (remote AI engine)');
+    expect(out()).toContain('hardcoded-secret-assignment');
+    expect(err()).toContain('the local rule engine did');
   });
 });
 
@@ -359,5 +370,117 @@ describe('scanDiff — the fallback (PRD §6.3)', () => {
     expect(result.engine).toBe('remote');
     expect(result.findings).toHaveLength(0);
     expect(result.exitCode).toBe(EXIT.OK);
+  });
+});
+
+/**
+ * Which engine was configured must not change the outcome for code the rule
+ * engine already has a confident answer about.
+ *
+ * The unit tests in engine/__tests__/reconcile.test.ts pin the policy; what
+ * these pin is that the policy is actually wired into a scan — that both modes
+ * are handed the same diff and come to the same conclusion about it. The fixture
+ * is the real one, and the model's answers below are the shape the live provider
+ * returned for it.
+ */
+describe('scanDiff — the two modes agree about the SQL fixture', () => {
+  const FIXTURE_PATH = 'server/routes/users.js';
+  const SQLI_FIXTURE_DIFF = diffForFixture('sql-injection.js', FIXTURE_PATH);
+
+  /** What the live model actually answered: right file, right class, one tier low. */
+  const TRIAGE_SQLI_HIGH = JSON.stringify({
+    findings: [
+      {
+        file: FIXTURE_PATH,
+        line_range: [11, 11],
+        severity: 'High',
+        category: 'sql_injection',
+        summary: 'User input is concatenated into the query string.',
+      },
+    ],
+  });
+
+  const PATCH_SQLI_HIGH = JSON.stringify({
+    file: FIXTURE_PATH,
+    line_range: [11, 11],
+    severity: 'High',
+    category: 'sql_injection',
+    explanation: 'The id parameter is concatenated straight into the SQL text.',
+    suggested_patch:
+      '--- a/server/routes/users.js\n+++ b/server/routes/users.js\n@@ -9,3 +9,3 @@\n' +
+      '-  const sql = "SELECT id, email FROM users WHERE id = " + userId;\n' +
+      '+  const sql = "SELECT id, email FROM users WHERE id = ?";\n',
+    confidence: 'high',
+  });
+
+  it('blocks the commit the rule engine blocks, even rated lower by the model', async () => {
+    // The defect this reconciliation exists for, at the level it was reported.
+    // Before the floor, these two runs disagreed: Local Mode refused the commit
+    // and Remote Mode warned and let it through — same fixture, same three
+    // vulnerable queries, opposite outcomes, decided entirely by configuration.
+    const localCapture = capture();
+    const local = await scanDiff({
+      diff: SQLI_FIXTURE_DIFF,
+      repoRoot: REPO_ROOT,
+      environment: WITHOUT_KEY,
+      ...localCapture.io,
+    });
+
+    const remoteCapture = capture();
+    const remote = await scanDiff({
+      diff: SQLI_FIXTURE_DIFF,
+      repoRoot: REPO_ROOT,
+      environment: WITH_KEY,
+      client: stubClient({ triage: TRIAGE_SQLI_HIGH, patch: PATCH_SQLI_HIGH }),
+      ...remoteCapture.io,
+    });
+
+    // Local Mode is the reference. Three queries, all Critical — the numbers
+    // reported from the live run.
+    expect(local.engine).toBe('local');
+    expect(local.exitCode).toBe(EXIT.BLOCKED);
+    expect(local.findings.map((finding) => finding.severity)).toEqual([
+      'Critical',
+      'Critical',
+      'Critical',
+    ]);
+
+    // Remote Mode must reach the same verdict on the same code.
+    expect(remote.engine).toBe('remote');
+    expect(remote.exitCode).toBe(local.exitCode);
+    expect(remote.findings).toHaveLength(1);
+    expect(remote.findings[0]?.severity).toBe('Critical');
+    expect(remoteCapture.err()).toContain('raised to Critical');
+    // The report itself has to carry the raised severity, not just the exit
+    // code: a developer reading "High" next to a blocked commit learns that the
+    // gate is arbitrary.
+    expect(remoteCapture.out()).toContain('Critical');
+  });
+
+  it('blocks it when triage reports nothing at all', async () => {
+    // The same weakness from the other direction, and the more dangerous one:
+    // the finding did not merely come back under-rated, it did not exist, so a
+    // clean AI scan reported a clean diff for code Local Mode refuses.
+    const localCapture = capture();
+    const local = await scanDiff({
+      diff: SQLI_FIXTURE_DIFF,
+      repoRoot: REPO_ROOT,
+      environment: WITHOUT_KEY,
+      ...localCapture.io,
+    });
+
+    const remoteCapture = capture();
+    const remote = await scanDiff({
+      diff: SQLI_FIXTURE_DIFF,
+      repoRoot: REPO_ROOT,
+      environment: WITH_KEY,
+      client: stubClient({ triage: '{"findings":[]}' }),
+      ...remoteCapture.io,
+    });
+
+    expect(remote.engine).toBe('remote');
+    expect(remote.exitCode).toBe(EXIT.BLOCKED);
+    expect(remote.findings).toEqual(local.findings);
+    expect(remoteCapture.err()).toContain('the local rule engine did');
   });
 });

@@ -191,6 +191,20 @@ export async function scanDiff(options: ScanDiffOptions): Promise<ScanResult> {
 
   const notes: string[] = [];
 
+  // ─── The rule engine runs in BOTH modes ────────────────────────────────────
+  // In Local Mode this IS the answer. In Remote Mode it is the floor: the AI
+  // findings are reconciled against it so a probabilistic judgement can raise a
+  // severity but never drop below what a regex match already established for the
+  // same class of bug (FR-5, engine/reconcile.ts). Without that, a critical
+  // string-concatenated query the rules rate Critical came back from the model as
+  // High — warning instead of blocking, on the same commit, purely because of
+  // which engine was configured.
+  //
+  // Run once, before the branch. It costs a couple of milliseconds, and it means
+  // the fallback path below reuses this result rather than scanning the diff a
+  // second time after a provider failure.
+  const baseline = await runLocalScan(options.diff, { exclude: loaded.isExcluded });
+
   if (mode.kind === 'remote') {
     try {
       const outcome = await runRemoteScan({
@@ -198,6 +212,7 @@ export async function scanDiff(options: ScanDiffOptions): Promise<ScanResult> {
         credentials: mode.credentials,
         remote: loaded.config.remote,
         exclude: loaded.isExcluded,
+        baseline,
         // Progress goes to stderr: stdout is the report, and a report with
         // status lines mixed into it is not parseable.
         onProgress: (message) => writeError(`${message}\n`),
@@ -254,18 +269,17 @@ export async function scanDiff(options: ScanDiffOptions): Promise<ScanResult> {
     }
   }
 
-  const findings = await runLocalScan(options.diff, { exclude: loaded.isExcluded });
-  const decision = evaluateThreshold(findings, loaded.config.threshold);
+  const decision = evaluateThreshold(baseline, loaded.config.threshold);
 
-  write(`${renderFindingsReport(findings, render)}\n`);
-  if (findings.length > 0) {
+  write(`${renderFindingsReport(baseline, render)}\n`);
+  if (baseline.length > 0) {
     const { blockOn, warnOn } = loaded.config.threshold;
     write(`\n${renderVerdict(decision, blockOn, warnOn, render)}\n`);
   }
 
   return {
     exitCode: decision.blocking.length > 0 ? EXIT.BLOCKED : EXIT.OK,
-    findings,
+    findings: baseline,
     decision,
     config: loaded.config,
     configPath: loaded.path,

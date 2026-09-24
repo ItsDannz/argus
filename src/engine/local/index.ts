@@ -92,6 +92,12 @@ export async function runLocalScan(
           findings.push({
             file: file.path,
             line: line.newLine,
+            // The rule's class, carried onto the finding rather than looked up
+            // later. The scanner is the last place that holds the `Rule`, and a
+            // lookup from a rule id back to a category would have to guess for
+            // any rule not in the built-in set — which is exactly what an FR-13
+            // user-defined rule would be.
+            category: rule.category,
             ruleId: rule.id,
             severity: rule.severity,
             message: rule.message,

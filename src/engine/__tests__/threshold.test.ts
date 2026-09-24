@@ -9,6 +9,10 @@ function finding(severity: Severity, over: Partial<LocalFinding> = {}): LocalFin
   return {
     file: 'src/db.js',
     line: 1,
+    // The threshold reads severity only, so the class is arbitrary here. `other`
+    // is the honest choice: it is what a finding with no rule behind it gets, and
+    // no rule in the built-in set produces it.
+    category: 'other',
     ruleId: `rule-${severity.toLowerCase()}`,
     severity,
     message: `${severity} finding`,
