@@ -448,9 +448,23 @@ describe('scanDiff — the two modes agree about the SQL fixture', () => {
     // Remote Mode must reach the same verdict on the same code.
     expect(remote.engine).toBe('remote');
     expect(remote.exitCode).toBe(local.exitCode);
-    expect(remote.findings).toHaveLength(1);
-    expect(remote.findings[0]?.severity).toBe('Critical');
+    expect(remote.findings).toHaveLength(3);
+    expect(remote.findings.map((finding) => finding.severity)).toEqual([
+      'Critical',
+      'Critical',
+      'Critical',
+    ]);
+
+    // And the same ROWS. The model reported line 11 only; lines 18 and 30 are
+    // two more injections it never mentioned, and they are kept per line rather
+    // than collapsed into the one finding the model did produce. Before that
+    // change this scan reported a single row — while the same scan with deep
+    // analysis failing and falling back to triage reported all three, which made
+    // the report's shape depend on whether Stage 2 happened to succeed.
+    expect(local.findings.map((finding) => finding.line)).toEqual([11, 18, 30]);
+    expect(remote.findings.map((finding) => finding.line)).toEqual([11, 18, 30]);
     expect(remoteCapture.err()).toContain('raised to Critical');
+    expect(remoteCapture.err()).toContain('2 other lines');
     // The report itself has to carry the raised severity, not just the exit
     // code: a developer reading "High" next to a blocked commit learns that the
     // gate is arbitrary.

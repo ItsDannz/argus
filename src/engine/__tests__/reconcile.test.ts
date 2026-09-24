@@ -129,25 +129,63 @@ describe('reconcileWithBaseline — the severity floor', () => {
     expect(result.notes[0]).toContain('src/config.js');
   });
 
-  it('does not add a rule finding for a group the AI already reported', () => {
-    // Deliberate, and the one place this trades completeness for quiet. Both
-    // engines pointing at one issue would render as two rows for the same line,
-    // and duplicate rows are what gets a pre-commit gate switched off. The commit
-    // outcome is unaffected: the group is floored either way.
+  it('keeps a rule match on a line the AI did not report, even in a covered group', () => {
+    // The shape three live runs disagreed about. With deep analysis succeeding,
+    // this diff reported one consolidated finding; with deep analysis failing
+    // and the scan falling back to triage, the same diff reported all three
+    // lines. The output shape depended on whether Stage 2 happened to succeed,
+    // which is not something a developer should be able to observe — so the
+    // successful path now matches the fallback path's granularity instead of
+    // losing information relative to it.
+    //
+    // Only the AI's own line is a duplicate. Lines 5 and 30 are two more
+    // injections the model did not mention, and dropping them was the tool
+    // being quieter than its own fallback.
     const result = reconcileWithBaseline({
-      counted: [finding('src/db.js', 12, 'sql_injection', 'High')],
+      counted: [
+        finding('src/db.js', 12, 'sql_injection', 'High', { ruleId: 'sql_injection' }),
+      ],
       dismissed: [],
       baseline: [
-        finding('src/db.js', 5, 'sql_injection', 'Critical'),
-        finding('src/db.js', 12, 'sql_injection', 'Critical'),
-        finding('src/db.js', 30, 'sql_injection', 'Critical'),
+        finding('src/db.js', 5, 'sql_injection', 'Critical', { ruleId: 'sql-string-concatenation' }),
+        finding('src/db.js', 12, 'sql_injection', 'Critical', { ruleId: 'sql-string-concatenation' }),
+        finding('src/db.js', 30, 'sql_injection', 'Critical', { ruleId: 'sql-string-concatenation' }),
       ],
     });
 
-    expect(result.counted).toHaveLength(1);
-    expect(result.counted[0]?.line).toBe(12);
-    expect(result.counted[0]?.severity).toBe('Critical');
-    expect(result.reinstated).toEqual([]);
+    expect(result.counted.map((entry) => entry.line)).toEqual([5, 12, 30]);
+    expect(result.counted.map((entry) => entry.severity)).toEqual([
+      'Critical',
+      'Critical',
+      'Critical',
+    ]);
+    // The AI's row is the one kept at line 12 — it carries the explanation and
+    // possibly a patch, so the rule match on that line is the duplicate. The two
+    // reinstated rows are the rule engine's own, which is what the rule id says.
+    expect(result.reinstated.map((entry) => entry.line)).toEqual([5, 30]);
+    expect(result.reinstated.map((entry) => entry.ruleId)).toEqual([
+      'sql-string-concatenation',
+      'sql-string-concatenation',
+    ]);
+    expect(result.notes).toContainEqual(expect.stringContaining('2 other lines'));
+  });
+
+  it('does not merge a rule match that is merely near the AI line', () => {
+    // Exact line equality, not an overlapping range. Both engines number lines
+    // in the new file, so equality means the same line — whereas a tolerance
+    // would additionally absorb a match a line or two away, and the model's line
+    // numbers are demonstrably approximate: a live run reported line 19 for a
+    // query the file has on line 18. Absorbing that would hide a real instance
+    // of the same bug, which is the failure this module exists to prevent.
+    // A near-duplicate row is the cheaper mistake.
+    const result = reconcileWithBaseline({
+      counted: [finding('src/db.js', 12, 'sql_injection', 'High')],
+      dismissed: [],
+      baseline: [finding('src/db.js', 13, 'sql_injection', 'Critical')],
+    });
+
+    expect(result.counted.map((entry) => entry.line)).toEqual([12, 13]);
+    expect(result.reinstated.map((entry) => entry.line)).toEqual([13]);
   });
 
   it('overrules a deep-analysis dismissal of a class the rules report', () => {

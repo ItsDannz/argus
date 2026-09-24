@@ -22,7 +22,8 @@
  *
  *   - Remote reported that category in that file — each such finding's severity
  *     is raised to at least the rule engine's severity there. Never lowered.
- *   - Remote reported nothing for it — the rule engine's findings are added.
+ *   - The rule engine flags a line Remote did not report — its finding is added
+ *     at that line. (Per line, not per group: see the merging section below.)
  *   - Deep analysis dismissed it as a false positive — the dismissal is
  *     overruled, because a dismissal is the extreme form of the same downgrade.
  *
@@ -47,15 +48,29 @@
  * or `unhandled_exception`, so the categories only Remote Mode can find are
  * never floored.
  *
- * ─── What is deliberately NOT done ───────────────────────────────────────────
- * Within a file and category Remote DID report, the report shows Remote's
- * locations rather than the rule engine's. Adding the local findings on top
- * would duplicate rows whenever both engines point at the same line, and
- * duplicated rows are exactly the noise that gets a pre-commit gate switched off
- * (PRD §11). The commit outcome is identical either way — the group carries a
- * floored severity, so it still blocks — and what is given up is only the sight
- * of a second and third instance of the same class in one file, which the next
- * commit's scan surfaces as soon as the first is fixed.
+ * ─── Merging a rule match into what the AI already reported ──────────────────
+ * The severity floor is per (file, category) — a rule match anywhere in a file
+ * sets the floor for that class across it. The question of whether a rule match
+ * is a SEPARATE finding is per line, and gets the opposite answer: a match on a
+ * line the AI also reported is the same occurrence and is dropped, because the
+ * AI's row carries the explanation and possibly a patch. A match on any other
+ * line in that file is a second occurrence and is kept as its own row.
+ *
+ * That distinction came from watching the tool disagree with itself. With deep
+ * analysis succeeding, the report showed one consolidated finding; with deep
+ * analysis failing and the scan falling back to triage, the same diff produced
+ * three individual rows. The output shape depended on whether Stage 2 happened to
+ * succeed, which is not something a developer should be able to observe. Merging
+ * per line makes the successful path match the fallback path's granularity
+ * instead of losing information relative to it.
+ *
+ * Exact line equality, not an overlapping range, and deliberately so. Both
+ * engines number lines in the new file, so equality means the same line — whereas
+ * a range would additionally absorb a rule match a line or two away, and the
+ * model's line numbers are demonstrably approximate: a live run reported line 19
+ * for a query the file has on line 18. Absorbing that would hide a real instance
+ * of the same bug, which is the exact failure this module exists to prevent.
+ * Showing a near-duplicate row is the cheaper mistake.
  */
 
 import type { Category, Severity } from '../prompts/security-agent-prompts';
@@ -75,10 +90,10 @@ export interface ReconcileResult {
   /** The final counted set: Remote's findings, floored and completed. */
   counted: Finding[];
   /**
-   * The baseline findings added because Remote Mode reported nothing for their
-   * (file, category). Same objects as the corresponding entries in `counted`,
-   * returned separately so a caller can tell an added finding from a reported
-   * one — they arrived with no deep analysis and no patch.
+   * The baseline findings added because Remote Mode reported nothing on their
+   * line. Same objects as the corresponding entries in `counted`, returned
+   * separately so a caller can tell an added finding from a reported one — they
+   * arrived with no deep analysis and no patch.
    */
   reinstated: Finding[];
   /** Dismissals that survived. Any overruled one is reported as a note instead. */
@@ -186,12 +201,22 @@ export function reconcileWithBaseline(input: ReconcileInput): ReconcileResult {
     raised.set(key, (raised.get(key) ?? 0) + 1);
   }
 
-  const covered = new Set(counted.map(groupKey));
+  // Which lines the AI already reported, per group. A rule match on one of them
+  // is the same occurrence and is dropped; a rule match elsewhere in the file is
+  // a second occurrence the AI said nothing about, and is kept.
+  const reportedLines = new Map<string, Set<number>>();
+  for (const finding of counted) {
+    const key = groupKey(finding);
+    const lines = reportedLines.get(key);
+    if (lines === undefined) reportedLines.set(key, new Set([finding.line]));
+    else lines.add(finding.line);
+  }
+
   const reinstatedFindings: Finding[] = [];
   const reinstated = new Map<string, number>();
   for (const finding of input.baseline) {
     const key = groupKey(finding);
-    if (covered.has(key)) continue;
+    if (reportedLines.get(key)?.has(finding.line) === true) continue;
     counted.push(finding);
     reinstatedFindings.push(finding);
     reinstated.set(key, (reinstated.get(key) ?? 0) + 1);
@@ -227,10 +252,18 @@ export function reconcileWithBaseline(input: ReconcileInput): ReconcileResult {
 
     const added = reinstated.get(key);
     if (added !== undefined) {
+      // Two shapes of the same correction, because the difference is worth
+      // reading: "the AI found none of this" and "the AI found some of this and
+      // missed the rest" call for quite different amounts of developer trust.
+      const headline = reportedLines.has(key)
+        ? `The AI engine reported ${floor.category} in ${floor.file}, but the local rule engine flags ` +
+          `${plural(added, 'other line')} there, so ` +
+          `${added === 1 ? 'that finding was' : 'those findings were'} kept.`
+        : `The AI scan reported no ${floor.category} in ${floor.file}, but the local rule engine did, so ` +
+          `${plural(added, 'local finding')} ${added === 1 ? 'was' : 'were'} kept.`;
       reinstatementNotes.push(
-        `The AI scan reported no ${floor.category} in ${floor.file}, but the local rule engine did, so ` +
-          `${plural(added, 'local finding')} ${added === 1 ? 'was' : 'were'} kept. Remote Mode is not allowed ` +
-          'to produce a weaker result than Local Mode for the same class of problem.',
+        `${headline} Remote Mode is not allowed to produce a weaker result than Local Mode for the same ` +
+          'class of problem.',
       );
     }
   }
