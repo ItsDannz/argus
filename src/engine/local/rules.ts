@@ -24,9 +24,33 @@
  */
 
 import type { Category, Severity } from '../../prompts/security-agent-prompts';
+import { fileExtension } from './source-file';
 
 /** File extensions treated as C/C++ for the C-specific detectors. */
 const C_FAMILY = ['.c', '.h', '.cc', '.cpp', '.cxx', '.hpp', '.hh', '.hxx', '.ino'];
+
+/** Languages with an `eval`-style dynamic-code-execution primitive. */
+const SCRIPT_LANGUAGES = [
+  '.js',
+  '.jsx',
+  '.mjs',
+  '.cjs',
+  '.ts',
+  '.tsx',
+  '.mts',
+  '.cts',
+  '.py',
+  '.pyi',
+  '.php',
+  '.rb',
+  '.lua',
+  '.pl',
+];
+
+/** Languages where `new Function(...)` compiles code at runtime. */
+const JS_LANGUAGES = ['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts'];
+
+const PYTHON = ['.py', '.pyi'];
 
 export interface Rule {
   /** Stable identifier. Used for config overrides (FR-9) and suppressions. */
@@ -238,16 +262,108 @@ const SQL_RULES: Rule[] = [
   },
 ];
 
+// ---------------------------------------------------------------------------
+// Dynamic code execution
+// ---------------------------------------------------------------------------
+
+const DYNAMIC_CODE_RULES: Rule[] = [
+  {
+    id: 'dynamic-code-execution-eval',
+    category: 'other',
+    severity: 'High',
+    message:
+      'eval() parses and runs its argument as code. If any part of that string can be influenced by a user, it is arbitrary code execution. Prefer an explicit parser (JSON.parse, ast.literal_eval) or a lookup table of allowed operations.',
+    pattern: /\beval\s*\(/,
+    // Case-sensitive on purpose: `Eval(` is far more likely to be somebody's own
+    // function than the built-in.
+    appliesTo: SCRIPT_LANGUAGES,
+  },
+  {
+    id: 'dynamic-code-execution-function-constructor',
+    category: 'other',
+    severity: 'High',
+    message:
+      'The Function constructor compiles its argument as code and is equivalent to eval() — it is not a safer alternative. Prefer an explicit parser or a lookup table.',
+    pattern: /\bnew\s+Function\s*\(/,
+    appliesTo: JS_LANGUAGES,
+  },
+  {
+    id: 'dynamic-code-execution-python-exec',
+    category: 'other',
+    severity: 'High',
+    message:
+      'exec() compiles and runs arbitrary Python. On any input a user can influence this is arbitrary code execution. Use ast.literal_eval for data, or a dispatch table for behaviour.',
+    pattern: /\bexec\s*\(/,
+    appliesTo: PYTHON,
+  },
+];
+
+// ---------------------------------------------------------------------------
+// Insecure cryptography
+// ---------------------------------------------------------------------------
+
 /**
- * The built-in rule set, in report order (secrets, then C, then injection, then
- * SQL). Ordering is presentation-only — `runLocalScan` groups by line, not by
- * rule, so reordering here does not change results.
+ * Severity note: MD5 and SHA-1 are Medium rather than High because the same call
+ * is entirely legitimate for a non-security checksum (content hashing, ETags,
+ * cache keys). Flagging those as High would be exactly the noise PRD §11 warns
+ * about. DES and ECB get High, because neither has a legitimate modern use once
+ * you have decided to encrypt something at all.
+ */
+const CRYPTO_RULES: Rule[] = [
+  {
+    id: 'insecure-crypto-md5',
+    category: 'insecure_crypto',
+    severity: 'Medium',
+    message:
+      'MD5 is cryptographically broken — collisions are practical to construct. It is acceptable for non-security checksums, but never for passwords, signatures, or any integrity check an attacker could influence. Use SHA-256 or better.',
+    // Covers both call forms (hashlib.md5(...), md5(...)) and the string form
+    // passed to a crypto API (createHash('md5'), MessageDigest.getInstance("MD5")).
+    pattern: /\bmd5\s*\(|['"]md5['"]/i,
+  },
+  {
+    id: 'insecure-crypto-sha1',
+    category: 'insecure_crypto',
+    severity: 'Medium',
+    message:
+      'SHA-1 is cryptographically broken for collision resistance (SHAttered). Fine for non-security checksums, never for signatures or password storage. Use SHA-256 or better.',
+    pattern: /\bsha1\s*\(|['"]sha1['"]/i,
+  },
+  {
+    id: 'insecure-crypto-des',
+    category: 'insecure_crypto',
+    severity: 'High',
+    message:
+      'DES and 3DES are obsolete: DES has a 56-bit key that is brute-forceable, and 3DES is deprecated by NIST. Use AES-256.',
+    // Covers the direct call (DES(...)), the PyCrypto/Java constructor form
+    // (DES.new(...), DESCipher(...)), the TripleDES spelling, and the string
+    // form (createCipheriv('des-ede3-cbc', ...)). The \b anchors keep
+    // identifiers like hash_codes( from matching.
+    pattern: /\bTripleDES(?:\.new)?\s*\(|\bDES(?:Cipher)?(?:\.new)?\s*\(|['"]des(?:['"]|-)/i,
+  },
+  {
+    id: 'insecure-crypto-ecb',
+    category: 'insecure_crypto',
+    severity: 'High',
+    message:
+      'ECB mode encrypts every block independently, so identical plaintext blocks produce identical ciphertext and the structure of the data leaks. Use AES-GCM, or CBC with a random IV.',
+    // `MODE_ECB` needs its own alternative: the underscore before "ECB" is a word
+    // character, so \bECB\b does not match inside it.
+    pattern: /MODE_ECB|\bECB\b/i,
+  },
+];
+
+/**
+ * The built-in rule set, in report order (secrets, C, injection, SQL, dynamic
+ * code, crypto). Ordering is presentation-only — `runLocalScan` groups by line,
+ * not by rule, so reordering here does not change results.
  */
 export const DEFAULT_RULES: readonly Rule[] = [
   ...SECRET_RULES,
   ...UNSAFE_C_RULES,
   ...COMMAND_INJECTION_RULES,
   ...SQL_RULES,
+  ...DYNAMIC_CODE_RULES,
+  ...CRYPTO_RULES,
 ];
 
 /**
@@ -257,7 +373,6 @@ export const DEFAULT_RULES: readonly Rule[] = [
  * @param filePath   Path as it appears in the diff.
  */
 export function rulesForFile(rules: readonly Rule[], filePath: string): Rule[] {
-  const dot = filePath.lastIndexOf('.');
-  const ext = dot === -1 ? '' : filePath.slice(dot).toLowerCase();
+  const ext = fileExtension(filePath);
   return rules.filter((rule) => rule.appliesTo === undefined || rule.appliesTo.includes(ext));
 }

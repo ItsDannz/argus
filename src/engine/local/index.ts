@@ -9,11 +9,18 @@
  * deletes is not this commit's problem, and flagging unchanged context would
  * report issues the developer never introduced — which is precisely the noise
  * that gets a pre-commit gate switched off.
+ *
+ * Whole-line comments are skipped as well, for the same anti-noise reason: a
+ * comment mentioning a dangerous call is documentation, not a vulnerability.
+ * See source-file.ts for exactly which lines qualify and why that skip is safe.
  */
 
 import { parseDiff } from '../diff';
 import { DEFAULT_RULES, rulesForFile, type Rule } from './rules';
+import { isWholeLineComment } from './source-file';
 import type { LocalFinding } from './types';
+
+export { commentPrefixesFor, fileExtension, isWholeLineComment } from './source-file';
 
 export type { LocalFinding } from './types';
 export type { Rule } from './rules';
@@ -53,6 +60,12 @@ export async function runLocalScan(
     for (const hunk of file.hunks) {
       for (const line of hunk.lines) {
         if (line.kind !== 'add' || line.newLine === null) continue;
+
+        // A whole-line comment cannot contain code, so scanning it can only
+        // produce false positives (e.g. a comment explaining a call that was
+        // removed). This is safe precisely because the skip is limited to lines
+        // that are *entirely* comments — see source-file.ts.
+        if (isWholeLineComment(file.path, line.content)) continue;
 
         for (const rule of applicable) {
           // Patterns are non-global by contract (see the Rule interface), so

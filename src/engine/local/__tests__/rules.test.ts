@@ -101,6 +101,54 @@ describe('rule detection — true positives', () => {
       code: 'os.system("ls " + path)',
       expected: ['command-injection-system'],
     },
+    {
+      name: 'eval() in JavaScript',
+      path: 'src/util.js',
+      code: 'eval(userInput);',
+      expected: ['dynamic-code-execution-eval'],
+    },
+    {
+      name: 'the Function constructor',
+      path: 'src/util.js',
+      code: 'const fn = new Function("a", "return a + 1");',
+      expected: ['dynamic-code-execution-function-constructor'],
+    },
+    {
+      name: 'exec() in Python',
+      path: 'app/run.py',
+      code: 'exec(user_code)',
+      expected: ['dynamic-code-execution-python-exec'],
+    },
+    {
+      name: 'md5() called directly',
+      path: 'app/auth.py',
+      code: 'digest = hashlib.md5(password).hexdigest()',
+      expected: ['insecure-crypto-md5'],
+    },
+    {
+      name: 'md5 named as a string to a crypto API',
+      path: 'src/auth.js',
+      code: "const h = crypto.createHash('md5').update(pw).digest('hex');",
+      expected: ['insecure-crypto-md5'],
+    },
+    {
+      name: 'sha1() called directly',
+      path: 'app/auth.py',
+      code: 'digest = hashlib.sha1(data).hexdigest()',
+      expected: ['insecure-crypto-sha1'],
+    },
+    {
+      name: 'DES in ECB mode (two rules on one line)',
+      path: 'app/legacy.py',
+      code: 'cipher = DES.new(key, DES.MODE_ECB)',
+      expected: ['insecure-crypto-des', 'insecure-crypto-ecb'],
+    },
+    {
+      name: 'ECB mode named in a cipher spec',
+      path: 'src/crypto.js',
+      code: "const cipher = crypto.createCipheriv('aes-256-ecb', key, iv);",
+      expected: ['insecure-crypto-ecb'],
+    },
   ];
 
   it.each(cases)('flags $name', async ({ path, code, expected }) => {
@@ -190,6 +238,26 @@ describe('rule detection — false positives must not fire', () => {
       path: 'src/util.js',
       code: 'const total = items.reduce((sum, item) => sum + item.price, 0);',
     },
+    {
+      name: 'an identifier that merely starts with "eval"',
+      path: 'src/util.js',
+      code: 'const evaluated = evaluateExpression(input);',
+    },
+    {
+      name: 'an identifier that merely starts with "exec"',
+      path: 'app/run.py',
+      code: 'result = execute_query(sql)',
+    },
+    {
+      name: 'an identifier that merely starts with "sha1"',
+      path: 'app/hash.py',
+      code: 'def sha1_of(data):',
+    },
+    {
+      name: 'a variable named "des" next to an unrelated string',
+      path: 'src/util.js',
+      code: 'const des = "description";',
+    },
   ];
 
   it.each(cases)('does not flag $name', async ({ path, code }) => {
@@ -197,16 +265,50 @@ describe('rule detection — false positives must not fire', () => {
   });
 });
 
-describe('documented limitation: a regex cannot tell code from a comment', () => {
-  it('flags a dangerous call that appears only inside a comment', async () => {
-    // Local Mode is pattern matching over single lines (PRD §6.2: "pattern-based
-    // warnings only — no contextual reasoning"). Distinguishing code from
-    // comments needs per-language parsing, which is out of scope here, and the
-    // consequence is this false positive. The test asserts it deliberately so
-    // the behaviour is a known property of the engine rather than a surprise,
-    // and so that adding comment-awareness later has something to flip.
-    expect(await ruleIdsFor('src/main.c', '// legacy: strcpy(dest, src);')).toEqual([
+describe('whole-line comment skipping', () => {
+  it('skips a // comment in a C file', async () => {
+    expect(await ruleIdsFor('src/main.c', '// legacy: strcpy(dest, src);')).toEqual([]);
+  });
+
+  it('skips a // comment in a JavaScript file', async () => {
+    expect(
+      await ruleIdsFor('src/config.js', '// const apiKey = "sk_live_9f8a7b6c5d4e3f2a1b0c";'),
+    ).toEqual([]);
+  });
+
+  it('skips a # comment in a Python file', async () => {
+    expect(await ruleIdsFor('app/settings.py', '# PASSWORD = "Spr1ng2024!prod"')).toEqual([]);
+  });
+
+  it('does NOT skip # in a C file, where it is a preprocessor directive', async () => {
+    // This is the whole reason the comment syntax is looked up per file type.
+    // "#" is a comment in Python but executable in C — skipping it here would
+    // hide a real macro definition, which is the one failure mode worse than a
+    // false positive.
+    expect(await ruleIdsFor('src/main.c', '#define BAD_COPY(d, s) strcpy(d, s)')).toEqual([
       'unsafe-c-strcpy',
     ]);
+  });
+
+  it('skips nothing in a file whose type it does not recognise', async () => {
+    // Conservative default: unknown extension means no comment syntax, so no
+    // line is ever silently ignored. The secret rule applies to every file type,
+    // which makes it the right probe here.
+    expect(
+      await ruleIdsFor('notes/snippet.txt', '// const apiKey = "sk_live_9f8a7b6c5d4e3f2a1b0c";'),
+    ).toEqual(['hardcoded-secret-assignment']);
+  });
+
+  it('still flags a trailing comment on a line that also contains code', async () => {
+    // Documented remaining limitation: splitting code from a trailing comment
+    // needs real parsing. The line is flagged once, which is the safe direction.
+    expect(await ruleIdsFor('src/main.c', 'copy(a, b); // strcpy(c, d);')).toEqual([
+      'unsafe-c-strcpy',
+    ]);
+  });
+
+  it('still flags a call inside a block comment', async () => {
+    // Same limitation, for /* ... */ — only whole-line comments are skipped.
+    expect(await ruleIdsFor('src/main.c', '/* strcpy(dest, src); */')).toEqual(['unsafe-c-strcpy']);
   });
 });
