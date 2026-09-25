@@ -24,7 +24,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
-import { afterAll, describe, expect, it } from '@jest/globals';
+import { afterAll, describe, expect, it, jest } from '@jest/globals';
 
 import type { Environment } from '../../engine/mode';
 import { API_KEY_VAR } from '../../engine/mode';
@@ -34,6 +34,21 @@ import { EXIT } from '../../exit-codes';
 import { scanDiff } from '../../hooks/pre-commit';
 import { runPatchCommand } from '../command';
 import type { ReviewChoice, ReviewQuestion } from '../review';
+
+/**
+ * Jest's 5-second default is a unit-test budget; these tests create a real
+ * repository and spawn real `git` processes, so their cost tracks how busy the
+ * machine is rather than how much work they do. Measured here: slowest test
+ * 0.8s idle, 1.1s with every core busy, 1.3s with every core busy and the rest
+ * of the suite running in parallel — the last being the condition this runs
+ * under in `npm test`, and the one the budget is derived from.
+ *
+ * 15 seconds is ~10x that worst measurement. Same reasoning as
+ * `hooks/__tests__/pre-commit.e2e.test.ts`, derived from this suite's own
+ * numbers: enough that scheduling alone cannot fail it, small enough that a real
+ * hang is still reported as a hang rather than as slowness.
+ */
+jest.setTimeout(15_000);
 
 const execFileAsync = promisify(execFile);
 

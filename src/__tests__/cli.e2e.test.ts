@@ -19,9 +19,22 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
-import { afterAll, describe, expect, it } from '@jest/globals';
+import { afterAll, describe, expect, it, jest } from '@jest/globals';
 
 import { EXIT } from '../exit-codes';
+
+/**
+ * Every test here runs `dist/cli.js` as a child process, so the same reasoning
+ * as the other process-spawning suites applies, with smaller numbers: slowest
+ * test 0.7s idle, 1.0s with every core busy, 1.1s with every core busy and the
+ * rest of the suite running in parallel. The last is the condition `npm test`
+ * creates, and the one the budget is derived from.
+ *
+ * 12 seconds is ~10x that worst measurement — derived per suite rather than
+ * inherited, because this suite spawns one process per test where the hook suite
+ * spawns a git repository's worth.
+ */
+jest.setTimeout(12_000);
 
 const execFileAsync = promisify(execFile);
 

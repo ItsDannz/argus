@@ -22,10 +22,28 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
-import { afterAll, describe, expect, it } from '@jest/globals';
+import { afterAll, describe, expect, it, jest } from '@jest/globals';
 
 import { CONFIG_FILENAME } from '../../config/schema';
 import { BACKUP_SUFFIX, HOOK_MARKER, installPreCommitHook } from '../pre-commit';
+
+/**
+ * Jest's default 5-second budget is a unit-test budget, and these are not unit
+ * tests: each one spawns real `git` five to eight times and lets the installed
+ * hook run the built CLI as a separate process. On Windows every spawn is a
+ * process creation, so the cost tracks how busy the machine is rather than how
+ * much work the test does.
+ *
+ * Measured here: slowest test ~1.0s on an idle machine, ~1.8s with every core
+ * busy and the rest of the suite running in parallel (the worst of any test in
+ * the repository). Inside the default — but the margin is under 3x, and when a
+ * loaded machine does cross it, the suite reports a timeout with no useful
+ * signal, because a slow spawn and a hang look identical from the outside.
+ *
+ * 20 seconds is ~10x the worst measurement: enough that scheduling alone cannot
+ * fail this suite, small enough that a real hang is still reported as a hang.
+ */
+jest.setTimeout(20_000);
 
 const execFileAsync = promisify(execFile);
 
