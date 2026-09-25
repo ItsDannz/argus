@@ -382,30 +382,41 @@ maybeGit('the mini-repo, scanned in Remote Mode against the recorded answers', (
     expect(sent).toContain('«REDACTED:');
     expect(sent).not.toContain('sk_live_9f8a7b6c5d4e3f2a1b0c');
     expect(sent).not.toContain('AKIAIOSFODNN7EXAMPLE');
+    // The scope boundary, over the real recording: the injection the model is
+    // being asked to fix arrives intact, quotes and all. Only credentials are
+    // withheld — redacting the vulnerability would remove the thing under review.
+    expect(sent).toContain('SELECT id, email FROM users WHERE id =');
     // And the diff on disk is untouched: redaction is about transmission, never
     // about what the developer has staged.
     expect(await repo.read('src/config.js')).toContain('sk_live_9f8a7b6c5d4e3f2a1b0c');
   });
 
   /**
-   * The redaction pass is a heuristic with a floor, and this pins what sits just
-   * below it. `dbPassword: "Spr1ng2024!prod"` is 15 characters; the backstop
-   * that redacts quoted values on a secret-shaped line requires 20
-   * (`engine/remote/redact.ts`, `QUOTED_VALUE`), so that literal is transmitted
-   * as written even though the rule engine flags that same line as a High
-   * hardcoded secret.
+   * The case that put the rule-engine floor into the redaction pass.
    *
-   * Asserted as a gap, not as correct behaviour. If the floor is lowered, or if
-   * redaction is ever informed by the rule engine's own findings, this test
-   * fails and whoever moves it has to decide the new behaviour deliberately. It
-   * can only ever fail in the safe direction.
+   * `dbPassword: "Spr1ng2024!prod"` is 15 characters and its identifier carries
+   * a prefix, so every heuristic in `engine/remote/redact.ts` walks past it: the
+   * generic assignment pattern's lookbehind needs `\bpassword\b` and `dbPassword`
+   * has no boundary there, and the entropy backstop's quoted-value floor is 20
+   * characters. The rule engine flags the line anyway — its pattern needs no word
+   * boundary — and before the floor existed this literal reached the provider in
+   * plaintext, which this test asserted as a known gap.
+   *
+   * It reads the other way now. The finding is what withholds the value, not a
+   * shorter floor and not a wider pattern: the heuristics are unchanged, and the
+   * named recognisers still label their own.
    */
-  it('does not redact a short password-shaped literal — a known gap, not a guarantee', async () => {
+  it('withholds a short password-shaped literal the heuristics would have missed', async () => {
     const repo = await materialise(COVERED);
 
     const sent = await promptsSent(repo);
 
-    expect(sent).toContain('Spr1ng2024!prod');
+    expect(sent).not.toContain('Spr1ng2024!prod');
+    expect(sent).toContain('«REDACTED:known-secret»');
+    // The other two credentials in the same file keep the labels their
+    // recognisers gave them: the floor is an addition, not a replacement.
+    expect(sent).toContain('«REDACTED:stripe-key»');
+    expect(sent).toContain('«REDACTED:aws-access-key»');
   });
 
   it('keeps the rule engine`s findings when the model declines to confirm them', async () => {

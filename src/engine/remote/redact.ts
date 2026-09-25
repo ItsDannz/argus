@@ -7,8 +7,8 @@
  * because the moment it becomes optional it becomes off.
  *
  * ─── Why this is NOT the detection rule set ──────────────────────────────────
- * `engine/local/rules.ts` also matches secrets, and reusing it here would be
- * wrong. The two have opposite cost functions:
+ * `engine/local/rules.ts` also matches secrets, and as a *pattern list* it is
+ * deliberately not reused here. The two have opposite cost functions:
  *
  *   Detection  — a false positive blocks a commit the developer did not deserve
  *                to have blocked, so those rules are tuned for precision.
@@ -16,7 +16,25 @@
  *                so this is tuned for recall. Better to mangle a harmless
  *                string than to leak a real key.
  *
- * Different costs, different patterns, so they are separate lists on purpose.
+ * Different costs, different patterns: the lists below stay as they are, because
+ * they catch credentials no rule recognises.
+ *
+ * ─── What is NOT kept separate: the conclusion ───────────────────────────────
+ * When the rule engine has already flagged a line as a hardcoded secret, this
+ * pass withholds that line's value regardless of its length or shape. A tool
+ * confident enough to block a commit over a credential is confident enough to
+ * stop transmitting it; asking a second, weaker heuristic to agree first is
+ * exactly how a 15-character password reaches a third party. The rules match
+ * `dbPassword:` (the credential name is a substring — no word boundary needed),
+ * while the heuristic's lookbehind requires `\bpassword\b` and its value floor is
+ * 20 characters, so every layer of the heuristic misses it. That is the concrete
+ * case that put {@link redactDiff}'s `knownSecrets` parameter here, fed from the
+ * same baseline the pipeline's severity floor consumes.
+ *
+ * The category is what crosses the boundary, never the matched text: redaction
+ * is about credential material, so only `hardcoded_secret` findings are passed
+ * in. An SQL injection is a vulnerability, not a secret, and the model needs to
+ * see it to reason about it.
  *
  * ─── Two invariants this must not break ──────────────────────────────────────
  * 1. LINE COUNT IS PRESERVED. Every replacement happens *within* a line, never
@@ -37,6 +55,8 @@
  * look at. The value is never returned at all — FR-10's reasoning about the API
  * key applies to every other credential that lands in a diff, too.
  */
+
+import { parseDiff } from '../diff';
 
 /**
  * The `g` flag is used throughout this file, which the rest of the codebase
@@ -92,6 +112,24 @@ export function containsPlaceholder(text: string): boolean {
 function replaceContent(rawLine: string, replacement: string): string {
   const marker = rawLine.charAt(0);
   return marker === '+' || marker === '-' || marker === ' ' ? `${marker}${replacement}` : replacement;
+}
+
+/**
+ * The content of a hunk body line, as `diff.ts` recorded it: no marker, and no
+ * line ending.
+ *
+ * The `\r` matters for a CRLF diff. `parseDiff` splits on `/\r?\n/`, so its
+ * content never carries a carriage return, while this module splits on `'\n'`
+ * and does. Without stripping it, no line from a CRLF diff would ever match a
+ * resolved secret — which is the one input shape where a silent miss means a
+ * credential goes out.
+ */
+function hunkBody(rawLine: string): string {
+  const marker = rawLine.charAt(0);
+  // A parsed content can never contain a newline, so this cannot be mistaken for
+  // one. `''` would be: an added blank line has exactly that content.
+  if (marker !== '+' && marker !== '-' && marker !== ' ') return '\n';
+  return rawLine.slice(1).replace(/\r$/, '');
 }
 
 /** `/^-----BEGIN ... PRIVATE KEY-----/` without the anchor, for scanning. */
@@ -186,6 +224,97 @@ function redactUnrecognised(line: string, note: (label: string) => string): stri
   });
 }
 
+/**
+ * A line the rule engine has already named a hardcoded secret.
+ *
+ * `Finding` satisfies this structurally, so the pipeline passes its baseline
+ * straight through — there is no adapter to keep in step with either type.
+ */
+export interface KnownSecret {
+  file: string;
+  /** New-side line number, which is what both engines report. */
+  line: number;
+}
+
+/**
+ * Resolves known secrets to the text of the lines that carry them.
+ *
+ * Keyed by *content* rather than by position, so this pass needs no line counter
+ * of its own. `diff.ts` owns line numbering — the module doc there is explicit
+ * that a second counter is a second source of truth for the one thing that must
+ * be exactly right — and reusing `parseDiff` means the numbers here are the same
+ * numbers every other consumer got.
+ *
+ * The content comes from the same text this pass is about to rewrite, so the two
+ * can never be looking at different revisions of the diff.
+ *
+ * A deleted line is skipped: it is not in the new file, so it cannot be the line
+ * the engine reported, and a context line that happens to match is included on
+ * purpose — the value is in the diff either way, and withholding it is the
+ * cheaper error.
+ */
+function confirmedValues(diff: string, known: readonly KnownSecret[]): Map<string, Set<string>> {
+  if (known.length === 0) return new Map();
+
+  const wanted = new Map<string, Set<number>>();
+  for (const secret of known) {
+    const lines = wanted.get(secret.file) ?? new Set<number>();
+    lines.add(secret.line);
+    wanted.set(secret.file, lines);
+  }
+
+  const confirmed = new Map<string, Set<string>>();
+  for (const file of parseDiff(diff)) {
+    const lines = wanted.get(file.path);
+    if (lines === undefined) continue;
+
+    const contents = new Set<string>();
+    for (const hunk of file.hunks) {
+      for (const line of hunk.lines) {
+        if (line.kind === 'del' || line.newLine === null) continue;
+        if (lines.has(line.newLine)) contents.add(line.content);
+      }
+    }
+    if (contents.size > 0) confirmed.set(file.path, contents);
+  }
+  return confirmed;
+}
+
+/**
+ * `identifier = "value"` — the assignment shape the hardcoded-secret rules match.
+ *
+ * Note what is missing compared with every other pattern in this file: no length
+ * floor, no entropy requirement, and no requirement that the identifier name a
+ * secret. The rule engine has already made that judgement about this line, and
+ * the whole point of this pass is not to re-litigate it.
+ */
+const ASSIGNED_VALUE = /([:=]\s*)(["'`])([^"'`\n]*)\2/g;
+
+/**
+ * Withholds the value on a line the rule engine reported as a hardcoded secret.
+ *
+ * The fallback matters more than it looks: if no assignment-shaped value can be
+ * located on the line, the whole line's content goes rather than the line going
+ * out as written. The engine said there is a credential here; not being able to
+ * put a finger on it is not a reason to transmit it. That is the same
+ * fail-closed rule the pipeline follows everywhere else — see the severity floor
+ * in engine/reconcile.ts.
+ */
+function redactConfirmedSecret(line: string, note: (label: string) => string): string {
+  let located = false;
+
+  const replaced = line.replace(ASSIGNED_VALUE, (whole, prefix: string, quote: string, value: string) => {
+    // Matched the assignment shape, so the value is accounted for either way:
+    // empty is nothing to leak, and a placeholder is a pattern that already took
+    // it (the value keeps whichever label got there first).
+    located = true;
+    if (value === '' || containsPlaceholder(value)) return whole;
+    return `${prefix}${quote}${note('known-secret')}${quote}`;
+  });
+
+  return located ? replaced : replaceContent(replaced, note('known-secret'));
+}
+
 /** One redacted value, reported without its contents. */
 export interface Redaction {
   /** Repo-relative path the value was found in, or "" before the first header. */
@@ -206,11 +335,16 @@ export interface RedactionResult {
  * Reports only the kind of each secret and the file it was in.
  *
  * @param diff Raw output of `git diff --cached`.
+ * @param knownSecrets Lines the Local Engine reported as hardcoded secrets. Their
+ *                     values are withheld whatever their shape; everything else
+ *                     is left to the patterns above. Passing none costs nothing
+ *                     and changes no other behaviour.
  * @returns The redacted diff and a list of what was removed. The line count of
  *          `diff` always equals that of the input.
  */
-export function redactDiff(diff: string): RedactionResult {
+export function redactDiff(diff: string, knownSecrets: readonly KnownSecret[] = []): RedactionResult {
   const redactions: Redaction[] = [];
+  const confirmed = confirmedValues(diff, knownSecrets);
   let file = '';
   let inPrivateKey = false;
 
@@ -255,6 +389,15 @@ export function redactDiff(diff: string): RedactionResult {
         if (containsPlaceholder(match)) return match;
         return note(label);
       });
+    }
+
+    // The rule engine's own findings, applied hardest last: a line it reported is
+    // withheld even when every pattern above walked past it, and even when the
+    // patterns above already took something off it (the placeholder check inside
+    // keeps the label of whichever recogniser got there first).
+    const contents = confirmed.get(file);
+    if (contents !== undefined && contents.has(hunkBody(rawLine))) {
+      line = redactConfirmedSecret(line, note);
     }
 
     return redactUnrecognised(line, note);

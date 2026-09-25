@@ -260,7 +260,16 @@ export async function runRemoteScan(options: RemoteScanOptions): Promise<RemoteS
     notes.push(`Excluded by configuration, not sent to the API: ${filtered.excluded.join(', ')}.`);
   }
 
-  const { diff: redacted, redactions } = redactDiff(filtered.diff);
+  // The rule engine's own conclusion, handed to the redactor as a floor. The
+  // baseline is already here — the severity floor consumes it below — so this
+  // costs nothing extra, and it is the same list of findings either way: the
+  // engine that decides a commit is worth blocking over a credential is the one
+  // that decides the credential does not leave the machine.
+  const confirmedSecrets = (options.baseline ?? []).filter(
+    (finding) => finding.category === 'hardcoded_secret',
+  );
+
+  const { diff: redacted, redactions } = redactDiff(filtered.diff, confirmedSecrets);
   if (redactions.length > 0) {
     const files = [...new Set(redactions.map((entry) => entry.file).filter((name) => name !== ''))];
     notes.push(

@@ -15,12 +15,25 @@
 
 import { describe, expect, it } from '@jest/globals';
 
+import type { Finding } from '../../findings';
 import type {
   LlmClient,
   LlmRequest,
 } from '../client';
 import { LlmError } from '../client';
 import { runRemoteScan } from '../index';
+
+/** A rule-engine finding, shaped exactly as the Local Engine emits them. */
+function secretFinding(file: string, line: number): Finding {
+  return {
+    file,
+    line,
+    category: 'hardcoded_secret',
+    ruleId: 'hardcoded-secret-assignment',
+    severity: 'High',
+    message: 'Possible hardcoded credential.',
+  };
+}
 
 // ---------------------------------------------------------------------------
 // A stub provider
@@ -567,6 +580,106 @@ describe('runRemoteScan — what leaves the machine', () => {
     expect(client.requests[0]?.user).toContain('REDACTED');
     expect(outcome.redactions.length).toBeGreaterThan(0);
     expect(notesText(outcome.notes)).toContain('Redacted');
+  });
+
+  it('withholds a secret the heuristics miss, because the rules reported it', async () => {
+    const diff = [
+      'diff --git a/src/config.js b/src/config.js',
+      'new file mode 100644',
+      'index 0000000..4444444',
+      '--- /dev/null',
+      '+++ b/src/config.js',
+      '@@ -0,0 +1,2 @@',
+      '+const config = {',
+      '+  dbPassword: "Spr1ng2024!prod",',
+      '',
+    ].join('\n');
+
+    const client = stubProvider({ triage: '{"findings":[]}' });
+    await runRemoteScan({ diff, credentials: CREDENTIALS, remote: REMOTE, client });
+
+    // The premise, and the reason this test exists: on its own, the redactor
+    // walks straight past this value. The rule engine's pattern matches
+    // `dbPassword` (the credential name is a substring of the identifier, and
+    // the rule needs no word boundary) while every heuristic in redact.ts needs
+    // one, and 15 characters is under the entropy backstop's floor.
+    expect(client.requests[0]?.user).toContain('Spr1ng2024!prod');
+
+    const reported = stubProvider({ triage: '{"findings":[]}' });
+    const outcome = await runRemoteScan({
+      diff,
+      credentials: CREDENTIALS,
+      remote: REMOTE,
+      client: reported,
+      baseline: [secretFinding('src/config.js', 2)],
+    });
+
+    expect(reported.requests[0]?.user).not.toContain('Spr1ng2024!prod');
+    expect(reported.requests[0]?.user).toContain('«REDACTED:known-secret»');
+    expect(outcome.redactions).toContainEqual({ file: 'src/config.js', label: 'known-secret' });
+  });
+
+  it('still sends the vulnerability it was asked to reason about', async () => {
+    const diff = [
+      'diff --git a/src/users.js b/src/users.js',
+      'new file mode 100644',
+      'index 0000000..5555555',
+      '--- /dev/null',
+      '+++ b/src/users.js',
+      '@@ -0,0 +1,1 @@',
+      `+const sql = "SELECT id FROM users WHERE name = \'" + name + "\'";`,
+      '',
+    ].join('\n');
+
+    const client = stubProvider({ triage: '{"findings":[]}' });
+    await runRemoteScan({
+      diff,
+      credentials: CREDENTIALS,
+      remote: REMOTE,
+      client,
+      // A rule-engine finding in a category that is not a credential. Only
+      // `hardcoded_secret` crosses into the redactor: withholding the injection
+      // would remove the thing the model was asked to fix.
+      baseline: [
+        {
+          file: 'src/users.js',
+          line: 1,
+          category: 'sql_injection',
+          ruleId: 'sql-string-concatenation',
+          severity: 'Critical',
+          message: 'SQL assembled with string concatenation.',
+        },
+      ],
+    });
+
+    expect(client.requests[0]?.user).toContain('SELECT id FROM users WHERE name =');
+    expect(client.requests[0]?.user).not.toContain('REDACTED');
+  });
+
+  it('sends a secret no rule and no pattern recognises — the residual', async () => {
+    const diff = [
+      'diff --git a/src/db.js b/src/db.js',
+      'new file mode 100644',
+      'index 0000000..6666666',
+      '--- /dev/null',
+      '+++ b/src/db.js',
+      '@@ -0,0 +1,1 @@',
+      '+const DATABASE_URL = "pg-super-secret-99";',
+      '',
+    ].join('\n');
+
+    const client = stubProvider({ triage: '{"findings":[]}' });
+    const outcome = await runRemoteScan({ diff, credentials: CREDENTIALS, remote: REMOTE, client });
+
+    // Pinned so the boundary stays visible rather than being rediscovered as a
+    // surprise. Nothing credential-shaped precedes the `=`, so no rule reports
+    // the line and nothing reaches the redactor through the baseline; the value
+    // is 18 characters, under the entropy backstop's 20. What is left is
+    // structural — redaction is pattern matching — and the answer is not a lower
+    // floor, which would start eating lockfile hashes, but the developer not
+    // committing the value.
+    expect(outcome.redactions).toEqual([]);
+    expect(client.requests[0]?.user).toContain('pg-super-secret-99');
   });
 
   it('never sends the API key in a prompt', async () => {
