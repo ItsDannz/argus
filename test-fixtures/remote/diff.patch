@@ -1,0 +1,64 @@
+diff --git a/src/config.js b/src/config.js
+new file mode 100644
+index 0000000..e41c321
+--- /dev/null
++++ b/src/config.js
+@@ -0,0 +1,21 @@
++// Fixture: hardcoded credentials, beside the way they should be read.
++//
++// The values are fake, and obviously so — but the detectors are about shape, not
++// authenticity, and a check that only fired on real credentials would be a check
++// that never fires in a test.
++//
++// The last one is safe: the assignment has no literal on the right-hand side.
++// The rule that flags the three above would be worthless if it could not tell
++// the difference, so the difference is here to be tested.
++const config = {
++  apiKey: "sk_live_9f8a7b6c5d4e3f2a1b0c",
++  dbPassword: "Spr1ng2024!prod",
++  awsAccessKeyId: "AKIAIOSFODNN7EXAMPLE",
++  region: "eu-west-1",
++  tokenTtlSeconds: 900,
++};
++
++module.exports = {
++  ...config,
++  sessionSecret: process.env.SESSION_SECRET,
++};
+diff --git a/src/routes/users.js b/src/routes/users.js
+new file mode 100644
+index 0000000..0a24bcc
+--- /dev/null
++++ b/src/routes/users.js
+@@ -0,0 +1,31 @@
++// Fixture: SQL injection through string assembly.
++//
++// Two vulnerable lines, both Critical, and the fixed form of the same query at
++// the bottom of the file. The second one is the shape real code actually has —
++// an apostrophe inside a double-quoted string — and is the line the detector
++// missed for two phases (see the note in engine/local/rules.ts).
++const express = require('express');
++const db = require('../db');
++
++const router = express.Router();
++
++router.get('/:id', (req, res) => {
++  const userId = req.params.id;
++  const sql = "SELECT id, email FROM users WHERE id = " + userId;
++  db.query(sql, (err, rows) => res.json(rows));
++});
++
++router.get('/by-name/:name', (req, res) => {
++  const name = req.params.name;
++  const sql = `SELECT id, email FROM users WHERE name = '${name}'`;
++  db.query(sql, (err, rows) => res.json(rows));
++});
++
++// Safe: the value is bound as a parameter, so it can never be parsed as SQL.
++router.get('/safe/:id', (req, res) => {
++  db.query('SELECT id, email FROM users WHERE id = ?', [req.params.id], (err, rows) =>
++    res.json(rows),
++  );
++});
++
++module.exports = router;

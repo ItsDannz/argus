@@ -1,0 +1,147 @@
+{
+  "$comment": [
+    "What the Local Static Engine must report for this tree, written by reading",
+    "the fixtures rather than by running the engine over them. That distinction",
+    "is the point: expectations produced from the engine's own output would only",
+    "detect change, never wrongness, and this table is meant to be wrong-able.",
+    "",
+    "Line numbers are in the NEW file, which for a repository commit is also the",
+    "line in the fixture as it sits on disk. Severities are the rule's own; what",
+    "the threshold does with them is a separate test."
+  ],
+  "findings": [
+    {
+      "file": "src/routes/users.js",
+      "line": 14,
+      "ruleId": "sql-string-concatenation",
+      "category": "sql_injection",
+      "severity": "Critical",
+      "why": "A complete SQL literal followed by concatenation."
+    },
+    {
+      "file": "src/routes/users.js",
+      "line": 20,
+      "ruleId": "sql-template-interpolation",
+      "category": "sql_injection",
+      "severity": "Critical",
+      "why": "A template literal with SQL in it and a substitution in it."
+    },
+    {
+      "file": "src/routes/search.js",
+      "line": 12,
+      "ruleId": "sql-string-concatenation",
+      "category": "sql_injection",
+      "severity": "Critical",
+      "why": "The caller chooses the sort column and it is concatenated in."
+    },
+    {
+      "file": "src/routes/search.js",
+      "line": 18,
+      "ruleId": "sql-string-concatenation",
+      "category": "sql_injection",
+      "severity": "Critical",
+      "why": "Concatenation around a quoted value. The apostrophe is inside the double-quoted string, which is the shape the detector missed for two phases."
+    },
+    {
+      "file": "src/reports/export.py",
+      "line": 10,
+      "ruleId": "sql-percent-format",
+      "category": "sql_injection",
+      "severity": "Critical",
+      "why": "A SQL literal with a substitution applied by %-formatting."
+    },
+    {
+      "file": "src/reports/export.py",
+      "line": 15,
+      "ruleId": "sql-fstring-interpolation",
+      "category": "sql_injection",
+      "severity": "Critical",
+      "why": "The same problem spelled as an f-string."
+    },
+    {
+      "file": "src/config.js",
+      "line": 11,
+      "ruleId": "hardcoded-secret-assignment",
+      "category": "hardcoded_secret",
+      "severity": "High",
+      "why": "A key-shaped name assigned a string literal."
+    },
+    {
+      "file": "src/config.js",
+      "line": 12,
+      "ruleId": "hardcoded-secret-assignment",
+      "category": "hardcoded_secret",
+      "severity": "High",
+      "why": "A password-shaped name assigned a string literal."
+    },
+    {
+      "file": "src/config.js",
+      "line": 13,
+      "ruleId": "hardcoded-secret-aws-key",
+      "category": "hardcoded_secret",
+      "severity": "Critical",
+      "why": "An access key ID in the AKIA form. Reported by the AWS rule and not by the generic assignment rule, which is why only one finding is expected on this line."
+    },
+    {
+      "file": "src/native/parse.c",
+      "line": 18,
+      "ruleId": "unsafe-c-strcpy",
+      "category": "unsafe_c_function",
+      "severity": "High",
+      "why": "strcpy into a fixed buffer."
+    },
+    {
+      "file": "src/native/parse.c",
+      "line": 24,
+      "ruleId": "unsafe-c-gets",
+      "category": "unsafe_c_function",
+      "severity": "Critical",
+      "why": "gets cannot be used safely."
+    },
+    {
+      "file": "src/native/parse.c",
+      "line": 25,
+      "ruleId": "command-injection-system",
+      "category": "command_injection",
+      "severity": "Critical",
+      "why": "system runs its argument through a shell."
+    },
+    {
+      "file": "src/native/parse.c",
+      "line": 30,
+      "ruleId": "unsafe-c-sprintf",
+      "category": "unsafe_c_function",
+      "severity": "High",
+      "why": "sprintf does not bound its output."
+    }
+  ],
+  "clean": [
+    "src/app.js",
+    "src/db.js",
+    "src/util/format.js"
+  ],
+  "cleanLines": [
+    {
+      "file": "src/routes/users.js",
+      "line": 26,
+      "why": "The same query with the value bound, so it can never be parsed as SQL."
+    },
+    {
+      "file": "src/reports/export.py",
+      "line": 20,
+      "why": "The Python driver's placeholder, which is binding by another name."
+    },
+    {
+      "file": "src/config.js",
+      "line": 20,
+      "why": "An assignment whose right-hand side is not a literal."
+    }
+  ],
+  "threshold": {
+    "blockOn": "Critical",
+    "warnOn": "High",
+    "verdict": "blocked",
+    "critical": 9,
+    "high": 4
+  }
+}

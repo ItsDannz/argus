@@ -1,0 +1,14 @@
+{
+  "name": "harborlight",
+  "version": "0.4.1",
+  "private": true,
+  "description": "Fixture: a small support-ticket service, vulnerable on purpose.",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "sqlite3": "^5.1.7"
+  }
+}

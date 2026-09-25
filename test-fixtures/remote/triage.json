@@ -1,0 +1,3 @@
+[
+  "{\"findings\":[{\"file\":\"src/config.js\",\"line_range\":[11,15],\"severity\":\"Critical\",\"category\":\"hardcoded_secret\",\"summary\":\"Hardcoded API key, database password, and AWS access key ID are committed directly in source.\"},{\"file\":\"src/routes/users.js\",\"line_range\":[11,12],\"severity\":\"Critical\",\"category\":\"sql_injection\",\"summary\":\"User-supplied route parameter is concatenated directly into a SQL query string.\"},{\"file\":\"src/routes/users.js\",\"line_range\":[18,19],\"severity\":\"Critical\",\"category\":\"sql_injection\",\"summary\":\"Route parameter is interpolated into a SQL query template literal without parameterization.\"}]}"
+]
