@@ -39,6 +39,7 @@ import { runRemoteScan, type DeepAnalysis, type LlmClient } from '../engine/remo
 import { evaluateThreshold, type ThresholdDecision } from '../engine/threshold';
 import { EXIT } from '../exit-codes';
 import { findRepoRoot, getStagedDiff, locatePreCommitHook, type HookMechanism } from '../git/repo';
+import { writeReport } from '../report/file';
 import {
   renderConfigProblems,
   renderFindingsReport,
@@ -191,6 +192,34 @@ export async function scanDiff(options: ScanDiffOptions): Promise<ScanResult> {
 
   const notes: string[] = [];
 
+  /**
+   * Records the finished scan to `.codeguard/report.json` (FR-12) and returns
+   * it unchanged, so both return paths can end with `return record({...})`.
+   *
+   * Deliberately NOT called on the `mode.kind === 'error'` path above: a report
+   * written by a scan that never ran would be indistinguishable from a clean
+   * one, and `patch --from-report` would read it as "there is nothing to fix".
+   * A stale report is the lesser problem, and its `generatedAt` says so.
+   *
+   * A write failure is reported and the scan continues. The report is a
+   * convenience; a pre-commit gate that blocks a commit because it could not
+   * write a cache file has traded the thing it is for against a thing it is not.
+   */
+  const record = async (result: ScanResult): Promise<ScanResult> => {
+    const written = await writeReport(options.repoRoot, {
+      engine: result.engine,
+      findings: result.findings,
+      dismissed: result.dismissed,
+      analyses: result.analyses,
+      notes: result.notes,
+    });
+    if (written.problem !== null) {
+      writeError(`CodeGuard: ${written.problem}.\n`);
+      result.notes.push(written.problem);
+    }
+    return result;
+  };
+
   // ─── The rule engine runs in BOTH modes ────────────────────────────────────
   // In Local Mode this IS the answer. In Remote Mode it is the floor: the AI
   // findings are reconciled against it so a probabilistic judgement can raise a
@@ -233,7 +262,7 @@ export async function scanDiff(options: ScanDiffOptions): Promise<ScanResult> {
       const noteBlock = renderNotes(outcome.notes, render);
       if (noteBlock !== '') writeError(`${noteBlock}\n`);
 
-      return {
+      return record({
         exitCode: decision.blocking.length > 0 ? EXIT.BLOCKED : EXIT.OK,
         findings: outcome.findings,
         decision,
@@ -244,7 +273,7 @@ export async function scanDiff(options: ScanDiffOptions): Promise<ScanResult> {
         notes: outcome.notes,
         dismissed: outcome.dismissed,
         analyses: outcome.analyses,
-      };
+      });
     } catch (error) {
       // Redacted here as well as inside the client. The client already strips
       // the key from its own messages, but this is the last point before an
@@ -277,7 +306,7 @@ export async function scanDiff(options: ScanDiffOptions): Promise<ScanResult> {
     write(`\n${renderVerdict(decision, blockOn, warnOn, render)}\n`);
   }
 
-  return {
+  return record({
     exitCode: decision.blocking.length > 0 ? EXIT.BLOCKED : EXIT.OK,
     findings: baseline,
     decision,
@@ -288,7 +317,7 @@ export async function scanDiff(options: ScanDiffOptions): Promise<ScanResult> {
     notes,
     dismissed: [],
     analyses: [],
-  };
+  });
 }
 
 export interface PreCommitOptions extends ScanIo {
@@ -298,6 +327,17 @@ export interface PreCommitOptions extends ScanIo {
   local?: boolean;
   /** Force Remote Mode (an error, not a fallback, without a key). */
   remote?: boolean;
+  /**
+   * Forwarded to the scan. Tests only; production reads the repository.
+   *
+   * Declared rather than left to the spread below. These were reaching the scan
+   * either way — `{...options}` copies every own property at runtime, whatever
+   * the parameter's type says — but an undeclared forwarding contract is one
+   * refactor away from breaking silently, and the thing it would break is the
+   * ability to test the remote path without a network.
+   */
+  environment?: Environment;
+  client?: LlmClient;
 }
 
 /**

@@ -170,7 +170,9 @@ Developers, especially students and solo/small-team developers, need something i
 
 #### 9.1.1 Package layout
 
-The original sketch in this section named only `src/prompts/`, `src/engine/local/`, `src/engine/remote/`, `src/hooks/` and `src/cli.ts`. Building it out showed that config parsing, Git plumbing and report rendering do not belong inside either `cli.ts` or `hooks/pre-commit.ts` — each of those two would have become a file with four unrelated reasons to change. They are separate modules, split by responsibility:
+The original sketch in this section named only `src/prompts/`, `src/engine/local/`, `src/engine/remote/`, `src/hooks/` and `src/cli.ts`. Building it out showed that config parsing, Git plumbing and report rendering do not belong inside either `cli.ts` or `hooks/pre-commit.ts` — each of those two would have become a file with four unrelated reasons to change. They are separate modules, split by responsibility.
+
+The same held for patch review: it arrived in Phase 5 as one more thing to hang off `cli.ts`, and instead became `src/patch/` — the review prompt, the patch parser, the apply step, the editor hand-off and the report reader share one subject and no other module's. `src/report/` gained a second file in the same phase, for the `.codeguard/report.json` that `--from-report` reads back (FR-12).
 
 ```
 codeguard/
@@ -186,14 +188,21 @@ codeguard/
 │   ├── git/repo.ts         staged-diff capture, hook-path discovery
 │   ├── hooks/pre-commit.ts the check, the hook body, and the installer
 │   ├── prompts/            system prompts + structured-output types (shared with Remote Mode)
-│   ├── report/render.ts    human-readable findings, verdict and config warnings
+│   ├── report/
+│   │   ├── render.ts       human-readable findings, verdict and config warnings
+│   │   └── file.ts         FR-12: .codeguard/report.json — written, read back, ignored by git
+│   ├── patch/              FR-7: review prompt, patch parser/repair, apply, editor, --from-report
 │   └── engine/
 │       ├── diff.ts         unified-diff parser — what both engines stand on
 │       ├── findings.ts     the finding shape both engines produce
 │       ├── threshold.ts    findings → blocking / warned / allowed
+│       ├── mode.ts         PRD §9.2 mode detector — key present and reachable
+│       ├── reconcile.ts    the floor: the AI may not return a weaker result than the rules
 │       ├── local/          FR-8: regex rule set over diff hunks (detection only)
-│       └── remote/         FR-3..FR-6: two-stage pipeline, provider client, redaction
-└── test-fixtures/          deliberately vulnerable mini-repo (Phase 6)
+│       └── remote/         FR-3..FR-6: two-stage pipeline, provider client, redaction, budget
+└── test-fixtures/
+    ├── mini-repo/          deliberately vulnerable repository, with expected.json (Phase 6)
+    └── remote/             real provider answers, recorded for offline replay (Phase 6)
 ```
 
 

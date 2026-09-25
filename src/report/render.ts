@@ -68,8 +68,14 @@ function makePainter(options: RenderOptions): (text: string, colour: string) => 
   return (text, colour) => `${colour}${text}${ANSI.reset}`;
 }
 
-/** `1 issue` / `2 issues`, without the "(s)" that reads like a template. */
-function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
+/**
+ * `1 issue` / `2 issues`, without the "(s)" that reads like a template.
+ *
+ * Exported for the same reason as {@link wrap}: the patch flow counts things
+ * too, and "1 findings" in the one message that says what was written to the
+ * developer's files is exactly the kind of detail that costs trust.
+ */
+export function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
   return `${count} ${count === 1 ? singular : pluralForm}`;
 }
 
@@ -84,8 +90,12 @@ function plural(count: number, singular: string, pluralForm = `${singular}s`): s
  * A word longer than the available space (a long identifier, a URL) is emitted
  * whole rather than split — breaking mid-identifier would make the message
  * harder to read, and the overflow is only cosmetic.
+ *
+ * Exported for the review prompt (patch/prompt.ts), which has the same problem
+ * one screen further on. One wrapping implementation, so a finding describes
+ * itself the same way whether it is being reported or reviewed.
  */
-function wrap(text: string, indent: string, width = WRAP_WIDTH): string {
+export function wrap(text: string, indent: string, width = WRAP_WIDTH): string {
   const available = Math.max(1, width - indent.length);
   const lines: string[] = [];
   let line = '';

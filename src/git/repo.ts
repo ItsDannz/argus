@@ -71,6 +71,23 @@ export async function getStagedDiff(repoRoot: string): Promise<string> {
   return simpleGit(repoRoot).raw([...STAGED_DIFF_ARGS]);
 }
 
+/**
+ * Stages files into the index (FR-7: an applied patch is staged for the user).
+ *
+ * Applying a patch edits the working tree, and the pre-commit gate reads the
+ * INDEX. Without this step an applied fix would be invisible to the re-scan
+ * that follows it, and the developer would be shown the same blocking verdict
+ * next to a file that no longer contains the vulnerability.
+ *
+ * Only the paths it is given: `git add -A` would sweep up whatever else the
+ * developer had in flight, and a security tool silently staging unrelated work
+ * is a worse outcome than the minor inconvenience it saves.
+ */
+export async function stageFiles(repoRoot: string, files: readonly string[]): Promise<void> {
+  if (files.length === 0) return;
+  await gitAt(repoRoot).add([...files]);
+}
+
 export type HookMechanism = 'husky' | 'native';
 
 export interface HookLocation {

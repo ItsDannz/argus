@@ -6,12 +6,12 @@
  *   scan      analyse a diff and report findings (staged changes by default).
  *             This is what the pre-commit hook runs.
  *   install   write the pre-commit hook (Husky if the repo uses it, else .git/hooks)
- *   patch     re-open the interactive apply flow from the last saved report (Phase 5)
+ *   patch     scan, then review/apply/stage the suggested patches (interactive)
  *   config    show, or initialise, .codeguardrc.json
  *
  * Exit codes are the CLI's contract with the hook and with any script wrapping
- * it — see exit-codes.ts. They are distinct on purpose: an unimplemented
- * command must never be mistakable for a clean scan, and "found a blocking
+ * it — see exit-codes.ts. They are distinct on purpose: a command that could
+ * not run must never be mistakable for a clean scan, and "found a blocking
  * issue" must never be mistakable for "the tool crashed".
  */
 
@@ -26,21 +26,11 @@ import { decideMode, loadEnvironment, type LocalSource } from './engine/mode';
 import { EXIT } from './exit-codes';
 import { findRepoRoot } from './git/repo';
 import { installPreCommitHook, runPreCommitCheck, scanDiff } from './hooks/pre-commit';
+import { runPatchCommand } from './patch/command';
+import { ensureReportIgnored, IGNORE_ENTRY } from './report/file';
 import { renderConfigProblems } from './report/render';
 
 const VERSION = '0.1.0';
-
-/**
- * Reports that a command exists but has no implementation yet.
- *
- * Writes to stderr (not stdout) so machine-readable stdout stays clean, and
- * exits 2 — distinct from 0 ("scanned, nothing found"), 1 ("tool errored") and
- * 3 ("found a blocking issue"), so a stub can never impersonate a clean scan.
- */
-function notImplemented(command: string, phase: number): void {
-  process.stderr.write(`codeguard ${command}: not implemented yet — scheduled for Phase ${phase}.\n`);
-  process.exitCode = EXIT.NOT_IMPLEMENTED;
-}
 
 /**
  * Whether ANSI colour is appropriate.
@@ -166,15 +156,39 @@ program
       process.stdout.write('  updated the existing CodeGuard hook in place (re-install is safe)\n');
     }
 
+    // The report contains `suggested_patch` — copies of the developer's own
+    // source — so the ignore entry is part of the install, not an afterthought.
+    // Additive and one line: an existing `.gitignore` is appended to, never
+    // rewritten, and the change is announced. A failure here is reported and the
+    // install still counts as successful, because an unreadable comment file is
+    // not a reason to throw away a hook that is already on disk.
+    const ignore = await ensureReportIgnored(repoRoot);
+    if (ignore.changed) {
+      process.stdout.write(`  added ${IGNORE_ENTRY} to .gitignore — the scan report holds patch text, not just findings\n`);
+    } else if (ignore.problem !== null) {
+      process.stderr.write(`codeguard install: ${ignore.problem}\n`);
+      process.stderr.write(`  add "${IGNORE_ENTRY}" yourself: the report contains source code from your patch suggestions.\n`);
+    }
+
     process.stdout.write('  the hook runs: codeguard scan --staged\n');
     process.stdout.write('  escape hatch:  git commit --no-verify\n');
   });
 
 program
   .command('patch')
-  .description('Reopen the interactive patch/apply flow for findings you skipped earlier')
+  .description('Review, apply and stage the patches a scan suggested (interactive)')
   .option('--from-report', 'reuse findings from .codeguard/report.json instead of rescanning')
-  .action(() => notImplemented('patch', 5));
+  .option('--local', 'force Local Static Engine Mode for the scan')
+  .option('--remote', 'force Remote AI Mode (requires DEEPSEEK_API_KEY)')
+  .option('--no-color', 'disable colour in output')
+  .action(async (options: { fromReport?: boolean; local?: boolean; remote?: boolean; color?: boolean }) => {
+    process.exitCode = await runPatchCommand({
+      useColor: colorEnabled(options.color),
+      ...(options.fromReport === true ? { fromReport: true } : {}),
+      ...(options.local === undefined ? {} : { local: options.local }),
+      ...(options.remote === undefined ? {} : { remote: options.remote }),
+    });
+  });
 
 program
   .command('config')
