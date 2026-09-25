@@ -12,8 +12,13 @@
  * shell that runs the tests.
  */
 
-import { describe, expect, it } from '@jest/globals';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
+import { afterAll, describe, expect, it } from '@jest/globals';
+
+import { CONFIG_FILENAME } from '../../config/schema';
 import type { Environment } from '../../engine/mode';
 import { API_KEY_VAR } from '../../engine/mode';
 import { diffForFixture } from '../../engine/local/__tests__/helpers';
@@ -133,6 +138,49 @@ function capture(): { io: { write: (t: string) => void; writeError: (t: string) 
   };
 }
 
+const cleanup: string[] = [];
+
+afterAll(async () => {
+  await Promise.all(cleanup.map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+/**
+ * A real directory holding a `.codeguardrc.json`.
+ *
+ * Real, unlike {@link REPO_ROOT}, because the config is what is under test here
+ * and `loadConfig` reads it from disk — a fabricated path would exercise the
+ * no-config branch instead, which is the one case this suite is not about.
+ */
+async function repoWithConfig(config: unknown): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'codeguard-mode-'));
+  cleanup.push(dir);
+  await writeFile(path.join(dir, CONFIG_FILENAME), JSON.stringify(config), 'utf8');
+  return dir;
+}
+
+/**
+ * A client that counts how often it was asked anything.
+ *
+ * The count, not the answer, is the assertion: "was the provider contacted at
+ * all" is the question a mis-scoped mode setting gets wrong, and a stub that
+ * merely returns text cannot tell the difference between being skipped and
+ * being asked something it happened to answer.
+ */
+function countingClient(answer: string | Error): { client: LlmClient; calls: () => number } {
+  let calls = 0;
+  return {
+    calls: () => calls,
+    client: {
+      model: 'counting-stub',
+      complete: async (): Promise<string> => {
+        calls += 1;
+        if (answer instanceof Error) throw answer;
+        return answer;
+      },
+    },
+  };
+}
+
 describe('scanDiff — Local Mode is the keyless default', () => {
   it('runs the rule engine when no key is available', async () => {
     const { io, out } = capture();
@@ -168,6 +216,73 @@ describe('scanDiff — Local Mode is the keyless default', () => {
 
     expect(result.engine).toBe('local');
     expect(out()).toContain('local engine');
+  });
+});
+
+/**
+ * `remote.hookMode` reaches a scan the developer typed, not only the hook's.
+ *
+ * This is the wiring, which is a separate claim from the precedence itself
+ * (`engine/__tests__/mode.test.ts` covers that): the setting lives in the config
+ * file, `scanDiff` is what loads the config, and every entry point that scans
+ * anything ends up there — the hook, `codeguard scan --staged`, and `codeguard
+ * scan --diff`. A repository that committed `local-only` to keep its own commits
+ * offline must not be one `node dist/cli.js scan` away from transmitting a diff.
+ *
+ * "No call was attempted" is asserted by counting an injected client's
+ * invocations rather than by reading the mode branch, because the failure mode
+ * this guards against — the setting not reaching the decision — looks perfectly
+ * correct in the code that contains it.
+ */
+describe('scanDiff — remote.hookMode applies to a scan, not only to the hook', () => {
+  it('does not contact the provider when the repository config says local-only', async () => {
+    const dir = await repoWithConfig({ remote: { hookMode: 'local-only' } });
+    const { io, out, err } = capture();
+    const provider = countingClient(
+      new LlmError('the provider was called by a scan that must not call it', 'transport'),
+    );
+
+    const result = await scanDiff({
+      diff: SQLI_DIFF,
+      repoRoot: dir,
+      environment: WITH_KEY,
+      client: provider.client,
+      ...io,
+    });
+
+    expect(provider.calls()).toBe(0);
+    expect(result.engine).toBe('local');
+    expect(out()).toContain('local engine');
+    expect(result.findings.length).toBeGreaterThan(0);
+    // Nothing was attempted, so nothing failed. This is the configured default,
+    // not the fallback, and the two must stay distinguishable in the output a
+    // developer actually reads.
+    expect(err()).not.toContain('DID NOT RUN');
+  });
+
+  it('does contact it from the same scan when the config says auto', async () => {
+    // The control, and the reason the test above means anything: without it, a
+    // scan that never reaches the provider for some unrelated reason — a stub the
+    // pipeline cannot get to, a mode resolved before the client is consulted —
+    // would let it pass while proving nothing. The config is the only difference
+    // between the two.
+    const dir = await repoWithConfig({ remote: { hookMode: 'auto' } });
+    const { io } = capture();
+    const provider = countingClient('{"findings":[]}');
+
+    const result = await scanDiff({
+      diff: SQLI_DIFF,
+      repoRoot: dir,
+      environment: WITH_KEY,
+      client: provider.client,
+      ...io,
+    });
+
+    expect(provider.calls()).toBeGreaterThan(0);
+    expect(result.engine).toBe('remote');
+    // And the rule engine still ran: the injection it detects keeps the commit
+    // blocked even though triage reported nothing.
+    expect(result.exitCode).toBe(EXIT.BLOCKED);
   });
 });
 
