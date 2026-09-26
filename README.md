@@ -1,4 +1,4 @@
-# CodeGuard
+# ARGUS - CodeGuard
 
 **ARGUS (Autonomous Code Security Guard & Patch Agent)** — a pre-commit security and logic-bug scanner for Git.
 
