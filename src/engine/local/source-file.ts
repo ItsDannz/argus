@@ -108,6 +108,18 @@ export function commentPrefixesFor(filePath: string): readonly string[] {
 /**
  * Returns true when a line is entirely a comment, and so cannot contain code.
  *
+ * The test is per-LINE and syntax-based, which has a known gap: Markdown has no
+ * entry in LINE_COMMENT_PREFIXES, so a vulnerable-looking example inside a fenced
+ * code block is scanned as though it were live code. That is why a file whose
+ * examples ARE the hazardous patterns has to be excluded by path — see the
+ * `excludePaths` list in this repository's own `.codeguardrc.json`, which covers
+ * `rules.ts`, the fixtures, the tests, the prompts and these docs.
+ *
+ * Teaching this function about fenced blocks, and more generally about telling a
+ * quoted example from live code, is a deliberate future improvement rather than an
+ * oversight: it changes what the rule engine considers code, so it wants its own
+ * evidence and tests instead of riding along with a documentation change.
+ *
  * @param filePath Path from the diff, used only to pick the comment syntax.
  * @param line     A single line of source, with the diff marker already removed.
  */
