@@ -14,8 +14,7 @@ available and optional.
 - **Local Static Engine** — regex rules, no key, no network, milliseconds. Detection only.
 - **Remote AI Mode** — DeepSeek, two-stage (triage then deep analysis), returns findings *and* patches.
 
-This is a portfolio-grade DevSecOps + LLM tooling project, at **v0.1.0**. The CLI is complete through its
-end-to-end test phase; the VS Code extension (FR-11) is not built. `PRD.md` is the requirements document.
+This is a portfolio-grade DevSecOps + LLM tooling project, at **v0.1.0**.
 
 ---
 
