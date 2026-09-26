@@ -1,6 +1,6 @@
 # CodeGuard
 
-**Autonomous Code Security Guard & Patch Agent** — a pre-commit security and logic-bug scanner for Git.
+**ARGUS (Autonomous Code Security Guard & Patch Agent)** — a pre-commit security and logic-bug scanner for Git.
 
 CodeGuard runs at `git commit` time, reads the **staged diff**, and reports security problems in the lines
 you are about to commit. With a DeepSeek API key it also proposes a patch for each finding and can apply it
