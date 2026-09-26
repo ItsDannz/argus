@@ -428,6 +428,37 @@ maybe('pre-commit hook, end to end', () => {
     expect(commit.code).not.toBe(0);
     expect(commit.output).toContain('Commit blocked');
   });
+
+  it('treats core.hooksPath set to the empty string as unset, not as the root', async () => {
+    // The regression: `git rev-parse --git-path` honours an empty core.hooksPath
+    // and answers `/pre-commit`, so the hook resolved to the filesystem ROOT —
+    // `C:\pre-commit` here — and the installer's mkdir died with EPERM trying to
+    // create `C:\`. On POSIX it would have attempted to write `/pre-commit`.
+    const repo = await setupRepo();
+    await repo.git('config', 'core.hooksPath', '');
+
+    // This is the assertion that used to throw EPERM: installHook checks the
+    // mechanism and path, which must now be Git's default location.
+    await repo.installHook();
+
+    // Dormant, not inert — and worth pinning, because it is a limit of what the
+    // installer can do here rather than a detail. Git honours the empty value
+    // itself and so runs no hook at all, at any path, which means an install
+    // into this repository does not make it protected until the setting is gone.
+    await repo.stage('db.js', SEEDED_SQLI);
+    expect((await repo.commit('no hook fires under an empty hooksPath')).code).toBe(0);
+
+    // The file written a moment ago is a working hook: removing the degenerate
+    // setting is all it takes for it to take effect. Without this half the test
+    // would pass just as well if the installer had written nothing useful.
+    await repo.git('config', '--unset', 'core.hooksPath');
+    await repo.stage('db2.js', SEEDED_SQLI);
+    const blocked = await repo.commit('seeded now that the hook is live');
+
+    expect(blocked.code).not.toBe(0);
+    expect(blocked.output).toContain('Commit blocked');
+    expect(blocked.output).toContain('sql-string-concatenation');
+  });
 });
 
 /**

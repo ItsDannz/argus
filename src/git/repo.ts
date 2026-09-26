@@ -94,8 +94,26 @@ export interface HookLocation {
   mechanism: HookMechanism;
   /** Absolute path of the pre-commit hook file to write. */
   hookPath: string;
-  /** Raw `core.hooksPath` value, or null when unset. Surfaced for reporting. */
+  /**
+   * Raw `core.hooksPath` value. Surfaced for reporting.
+   *
+   * Null when unset *or* when set to the empty string: an empty value is
+   * degenerate and treated as unset, so it is reported as absent rather than
+   * echoed back as a setting the user might think is doing something.
+   */
   coreHooksPath: string | null;
+}
+
+/**
+ * Absolute `$GIT_COMMON_DIR`, which `--git-common-dir` may report relatively.
+ *
+ * The common dir rather than the per-worktree one, because that is where Git
+ * keeps hooks: in a linked worktree `--git-dir` is `.git/worktrees/<name>`, and
+ * a hook written there would never run.
+ */
+async function gitCommonDir(git: SimpleGit, repoRoot: string): Promise<string> {
+  const reported = (await git.raw(['rev-parse', '--git-common-dir'])).trim();
+  return path.isAbsolute(reported) ? reported : path.resolve(repoRoot, reported);
 }
 
 /**
@@ -123,6 +141,14 @@ function isHuskyHooksPath(hooksPath: string): boolean {
  *
  * Note that a `.husky/` directory which exists but is NOT active (no
  * `core.hooksPath`) is correctly ignored: Git would not run a hook there.
+ *
+ * A `core.hooksPath` set to the empty string is treated as unset. That is not
+ * cosmetic: `git rev-parse --git-path` HONOURS the empty value and answers
+ * `/pre-commit`, i.e. the filesystem root. Resolving that put the hook at
+ * `C:\pre-commit` on Windows and `/pre-commit` on POSIX, and the installer's
+ * `mkdir` then failed with EPERM trying to create the root directory. The value
+ * is also a known way to try to switch hooks off, so writing anything under it
+ * is the last thing to want.
  */
 export async function locatePreCommitHook(repoRoot: string): Promise<HookLocation> {
   const git = simpleGit(repoRoot);
@@ -130,9 +156,10 @@ export async function locatePreCommitHook(repoRoot: string): Promise<HookLocatio
   // `--default ''` keeps this exit-0 when the key is unset. A bare
   // `git config --get` exits 1, which simple-git turns into a thrown error, and
   // "unset" is a normal state rather than a failure.
-  const coreHooksPath = (await git.raw(['config', '--get', '--default', '', 'core.hooksPath'])).trim();
+  const configured = (await git.raw(['config', '--get', '--default', '', 'core.hooksPath'])).trim();
+  const coreHooksPath = configured === '' ? null : configured;
 
-  if (coreHooksPath !== '' && isHuskyHooksPath(coreHooksPath)) {
+  if (coreHooksPath !== null && isHuskyHooksPath(coreHooksPath)) {
     return {
       mechanism: 'husky',
       hookPath: path.join(repoRoot, '.husky', 'pre-commit'),
@@ -140,12 +167,20 @@ export async function locatePreCommitHook(repoRoot: string): Promise<HookLocatio
     };
   }
 
-  const reported = (await git.raw(['rev-parse', '--git-path', 'hooks/pre-commit'])).trim();
+  // `--git-path` answers "where will Git look", which is exactly the question,
+  // except in the empty-value case above where it answers with the root. Going
+  // through the common dir for that one case asks the same question of a setting
+  // `core.hooksPath` cannot influence.
+  const reported =
+    coreHooksPath === null
+      ? path.join(await gitCommonDir(git, repoRoot), 'hooks', 'pre-commit')
+      : (await git.raw(['rev-parse', '--git-path', 'hooks/pre-commit'])).trim();
+
   return {
     mechanism: 'native',
-    // --git-path returns a path relative to the repo root when it can, so it has
-    // to be resolved before being written to.
+    // Both branches can report a path relative to the repo root, so it has to be
+    // resolved before being written to.
     hookPath: path.isAbsolute(reported) ? reported : path.resolve(repoRoot, reported),
-    coreHooksPath: coreHooksPath === '' ? null : coreHooksPath,
+    coreHooksPath,
   };
 }
