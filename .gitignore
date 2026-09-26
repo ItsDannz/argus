@@ -26,6 +26,4 @@ Thumbs.db
 npm-debug.log*
 
 # --- Docs kept local only, not pushed ---
-README.md
-ARCHITECTURE.md
 docs/CODE_WALKTHROUGH.md

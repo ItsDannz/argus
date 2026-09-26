@@ -12,6 +12,8 @@
     "src/engine/local/rules.ts",
     "test-fixtures/**",
     "**/__tests__/**",
-    "src/prompts/security-agent-prompts.ts"
+    "src/prompts/security-agent-prompts.ts",
+    "README.md",
+    "ARCHITECTURE.md"
   ]
 }
