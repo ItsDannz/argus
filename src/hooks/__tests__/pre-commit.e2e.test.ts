@@ -25,7 +25,7 @@ import { promisify } from 'node:util';
 import { afterAll, describe, expect, it, jest } from '@jest/globals';
 
 import { CONFIG_FILENAME } from '../../config/schema';
-import { BACKUP_SUFFIX, HOOK_MARKER, installPreCommitHook } from '../pre-commit';
+import { BACKUP_SUFFIX, HOOK_MARKER, installPreCommitHook, type InstallResult } from '../pre-commit';
 
 /**
  * Jest's default 5-second budget is a unit-test budget, and these are not unit
@@ -89,8 +89,8 @@ interface Repo {
   commit: (message: string, ...extra: string[]) => Promise<RunResult>;
   commitCount: () => Promise<number>;
   head: () => Promise<string>;
-  /** Installs the hook, asserting it went to the native path. */
-  installHook: () => Promise<void>;
+  /** Installs the hook, asserting it went to the native path. Returns the result. */
+  installHook: () => Promise<InstallResult>;
 }
 
 async function setupRepo(): Promise<Repo> {
@@ -121,10 +121,11 @@ async function setupRepo(): Promise<Repo> {
 
   const head = async (): Promise<string> => (await git('log', '-1', '--format=%s')).output.trim();
 
-  const installHook = async (): Promise<void> => {
+  const installHook = async (): Promise<InstallResult> => {
     const result = await installPreCommitHook(dir);
     expect(result.mechanism).toBe('native');
     expect(result.hookPath).toBe(path.join(dir, '.git', 'hooks', 'pre-commit'));
+    return result;
   };
 
   const repo: Repo = { dir, git, stage, commit, commitCount, head, installHook };
@@ -439,7 +440,13 @@ maybe('pre-commit hook, end to end', () => {
 
     // This is the assertion that used to throw EPERM: installHook checks the
     // mechanism and path, which must now be Git's default location.
-    await repo.installHook();
+    const installed = await repo.installHook();
+
+    // And the install knows it cannot protect this repository, which is what lets
+    // the command warn instead of reporting an unqualified success. An absent key
+    // must not produce this flag — the two states are a catch and an empty string
+    // apart in `git config --get`, and only that exit code separates them.
+    expect(installed.hooksPathIsEmpty).toBe(true);
 
     // Dormant, not inert — and worth pinning, because it is a limit of what the
     // installer can do here rather than a detail. Git honours the empty value
@@ -452,6 +459,12 @@ maybe('pre-commit hook, end to end', () => {
     // setting is all it takes for it to take effect. Without this half the test
     // would pass just as well if the installer had written nothing useful.
     await repo.git('config', '--unset', 'core.hooksPath');
+
+    // The flag tracks the setting rather than the repository: cleared, the same
+    // install reports an ordinary one and no warning is due.
+    const after = await repo.installHook();
+    expect(after.hooksPathIsEmpty).toBe(false);
+
     await repo.stage('db2.js', SEEDED_SQLI);
     const blocked = await repo.commit('seeded now that the hook is live');
 

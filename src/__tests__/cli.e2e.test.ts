@@ -179,4 +179,40 @@ maybeGit('codeguard install', () => {
     expect(await readFile(path.join(repo, '.gitignore'), 'utf8')).toBe('node_modules/\n.codeguard/\n');
     expect(second.stdout).not.toContain('added .codeguard/ to .gitignore');
   });
+
+  it('says the hook is dormant, not just installed, when core.hooksPath is empty', async () => {
+    // The gap this closes: an empty core.hooksPath makes Git run no hook at any
+    // path, so the install cannot protect this repository — and the setting is
+    // invisible from the hook, from the diff, and from every later scan. A bare
+    // success message leaves a developer believing they are guarded while nothing
+    // runs, which is the one outcome worse than a failed install.
+    const repo = await scratchRepo();
+    await execFileAsync('git', ['config', 'core.hooksPath', ''], { cwd: repo, windowsHide: true });
+
+    const run = await cli(['install'], repo);
+
+    // Still exit 0. The hook was written correctly and takes effect the moment the
+    // value is cleared, so this warns about the setting rather than failing the
+    // install — and it warns on stderr, where it cannot be mistaken for the
+    // command's ordinary chatter.
+    expect(run.code).toBe(0);
+    expect(run.stderr).toContain('core.hooksPath is set to the empty string');
+    expect(run.stderr).toContain('git config --unset core.hooksPath');
+    // The path is Git's default hooks directory, not the filesystem root that the
+    // empty value resolves `--git-path` to.
+    expect(existsSync(path.join(repo, '.git', 'hooks', 'pre-commit'))).toBe(true);
+  });
+
+  it('does not warn about dormancy on an ordinary install', async () => {
+    // The control. Without it the test above would pass just as well for a warning
+    // printed unconditionally, which would be noise on every install rather than a
+    // signal about this one.
+    const repo = await scratchRepo();
+
+    const run = await cli(['install'], repo);
+
+    expect(run.code).toBe(0);
+    expect(run.stderr).not.toContain('dormant');
+    expect(run.stderr).not.toContain('core.hooksPath');
+  });
 });

@@ -518,6 +518,12 @@ export interface InstallResult {
   backupPath: string | null;
   /** Raw `core.hooksPath`, for reporting which mechanism was detected and why. */
   coreHooksPath: string | null;
+  /**
+   * True when `core.hooksPath` is set to the empty string, which makes Git run no
+   * hook at any path: the hook is installed and dormant. Passed through for the
+   * caller to warn about — see `HookLocation.hooksPathIsEmpty`.
+   */
+  hooksPathIsEmpty: boolean;
 }
 
 async function exists(filePath: string): Promise<boolean> {
@@ -620,6 +626,7 @@ export async function installPreCommitHook(repoRoot: string): Promise<InstallRes
     action,
     backupPath,
     coreHooksPath: location.coreHooksPath,
+    hooksPathIsEmpty: location.hooksPathIsEmpty,
   };
 }
 

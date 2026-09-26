@@ -80,11 +80,17 @@ Two things `codeguard install` is careful about, both reported in its output:
 - **Re-running is safe.** A second `codeguard install` updates the hook in place rather than nesting a
   second call, and does not orphan the backup from the first run.
 
-One install case is a trap, and `install` does not currently say so. If `core.hooksPath` is set to the
-empty string, the hook is written to Git's default location and the command reports success — but **Git
-runs nothing**: it honours the empty value itself and looks for the hook at the filesystem root. The file
-sits inert, and the repository is unprotected until you run `git config --unset core.hooksPath`. If that
-setting has ever been touched in your repository, check it once with `git config --get core.hooksPath`.
+One install case is a trap, and `install` warns about it rather than reporting a bare success. If
+`core.hooksPath` is set to the empty string, the hook is written to Git's default location but **Git runs
+nothing**: it honours the empty value itself and looks for the hook at the filesystem root. The install
+still exits 0 — the file is correct and takes effect the moment the value is gone — but until then it prints
+the dormancy warning on stderr, naming the command that clears it:
+
+```
+codeguard install: core.hooksPath is set to the empty string, so Git runs NO hook at any path.
+  the hook at .git/hooks/pre-commit is dormant until that is cleared:
+  git config --unset core.hooksPath
+```
 
 The installed hook resolves the executable as `CODEGUARD_BIN` → `./node_modules/.bin/codeguard` →
 `codeguard` on `PATH`. If none is found it prints three lines of warning and **allows the commit** — see the

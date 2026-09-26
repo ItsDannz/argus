@@ -94,14 +94,17 @@ export interface HookLocation {
   mechanism: HookMechanism;
   /** Absolute path of the pre-commit hook file to write. */
   hookPath: string;
-  /**
-   * Raw `core.hooksPath` value. Surfaced for reporting.
-   *
-   * Null when unset *or* when set to the empty string: an empty value is
-   * degenerate and treated as unset, so it is reported as absent rather than
-   * echoed back as a setting the user might think is doing something.
-   */
+  /** Raw `core.hooksPath` value, when it is set to something usable. Null otherwise. */
   coreHooksPath: string | null;
+  /**
+   * True when `core.hooksPath` is set to the empty string.
+   *
+   * Kept separate from a null `coreHooksPath` because the two are not the same
+   * situation for the user. An absent key is ordinary; the empty value makes Git
+   * run NO hook at any path, so an install into that repository is dormant and
+   * the command has to say so rather than report a bare success.
+   */
+  hooksPathIsEmpty: boolean;
 }
 
 /**
@@ -149,21 +152,40 @@ function isHuskyHooksPath(hooksPath: string): boolean {
  * `mkdir` then failed with EPERM trying to create the root directory. The value
  * is also a known way to try to switch hooks off, so writing anything under it
  * is the last thing to want.
+ *
+ * The case is reported as its own field rather than folded into a null
+ * `coreHooksPath` so a caller can warn about it: the hook is written, and Git
+ * runs nothing, which is a success message and an unprotected repository at the
+ * same time.
  */
 export async function locatePreCommitHook(repoRoot: string): Promise<HookLocation> {
   const git = simpleGit(repoRoot);
 
-  // `--default ''` keeps this exit-0 when the key is unset. A bare
-  // `git config --get` exits 1, which simple-git turns into a thrown error, and
-  // "unset" is a normal state rather than a failure.
-  const configured = (await git.raw(['config', '--get', '--default', '', 'core.hooksPath'])).trim();
-  const coreHooksPath = configured === '' ? null : configured;
+  // Whether the key is SET is read here, not just its value, and that distinction
+  // is load-bearing: an empty value needs a warning an absent key must not get.
+  // `--get` cannot make it — git answers an absent key and an empty one with `""`
+  // and `"\n"` respectively, which trim to the same string, and simple-git does
+  // not throw on the exit code that separates them (measured: it resolves both to
+  // ""). `--get-regexp` prints a line whenever the key is set, empty value
+  // included, and prints nothing when it is absent, so the difference is in the
+  // output rather than in a status code nobody surfaces.
+  let coreHooksPath: string | null = null;
+  let hooksPathIsEmpty = false;
+  const configured = (await git.raw(['config', '--get-regexp', '^core\\.hooksPath$'])).trim();
+  if (configured !== '') {
+    const separator = configured.indexOf(' ');
+    // No separator means the key is set with nothing after it: the empty string.
+    const value = separator === -1 ? '' : configured.slice(separator + 1).trim();
+    if (value === '') hooksPathIsEmpty = true;
+    else coreHooksPath = value;
+  }
 
   if (coreHooksPath !== null && isHuskyHooksPath(coreHooksPath)) {
     return {
       mechanism: 'husky',
       hookPath: path.join(repoRoot, '.husky', 'pre-commit'),
       coreHooksPath,
+      hooksPathIsEmpty: false,
     };
   }
 
@@ -171,10 +193,9 @@ export async function locatePreCommitHook(repoRoot: string): Promise<HookLocatio
   // except in the empty-value case above where it answers with the root. Going
   // through the common dir for that one case asks the same question of a setting
   // `core.hooksPath` cannot influence.
-  const reported =
-    coreHooksPath === null
-      ? path.join(await gitCommonDir(git, repoRoot), 'hooks', 'pre-commit')
-      : (await git.raw(['rev-parse', '--git-path', 'hooks/pre-commit'])).trim();
+  const reported = hooksPathIsEmpty
+    ? path.join(await gitCommonDir(git, repoRoot), 'hooks', 'pre-commit')
+    : (await git.raw(['rev-parse', '--git-path', 'hooks/pre-commit'])).trim();
 
   return {
     mechanism: 'native',
@@ -182,5 +203,6 @@ export async function locatePreCommitHook(repoRoot: string): Promise<HookLocatio
     // resolved before being written to.
     hookPath: path.isAbsolute(reported) ? reported : path.resolve(repoRoot, reported),
     coreHooksPath,
+    hooksPathIsEmpty,
   };
 }

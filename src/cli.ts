@@ -147,6 +147,20 @@ program
       process.stdout.write(`  detected via core.hooksPath = ${result.coreHooksPath}\n`);
     }
 
+    // A successful install that cannot protect anything is worse than an error,
+    // because nothing tells the developer to go looking. Git honours an empty
+    // core.hooksPath and runs no hook at any path, so the file just written is
+    // dormant until the setting is cleared — and the setting is not visible from
+    // the hook, the diff, or any later scan. Exit stays 0: the hook is correct and
+    // takes effect the moment the value is gone. It is the silence that would be
+    // the defect, so this goes to stderr where a problem cannot be mistaken for
+    // the install's normal chatter.
+    if (result.hooksPathIsEmpty) {
+      process.stderr.write('codeguard install: core.hooksPath is set to the empty string, so Git runs NO hook at any path.\n');
+      process.stderr.write(`  the hook at ${shown} is dormant until that is cleared:\n`);
+      process.stderr.write('  git config --unset core.hooksPath\n');
+    }
+
     if (result.action === 'wrapped' && result.backupPath !== null) {
       const backup = displayPath(repoRoot, result.backupPath);
       process.stdout.write(

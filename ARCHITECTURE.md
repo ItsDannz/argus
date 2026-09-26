@@ -426,6 +426,12 @@ automatically, because the choice belongs to the repository, not to CodeGuard:
   path comes from `--git-common-dir` instead, which `core.hooksPath` cannot influence and which is the
   common dir rather than the per-worktree one — hooks hang off the former. The two answers agree in every
   case except this one, which is why the branch is scoped to it.
+  **The install says so rather than reporting a bare success.** A hook that is written and never run is the
+  one outcome worse than a failed install, because nothing tells the developer to look — the setting is
+  invisible from the hook, from the diff, and from every later scan. So `codeguard install` prints the
+  dormancy warning on stderr and still exits 0: the file is correct, and it works the moment the value is
+  cleared. This is the same rule as the redaction floor and the severity floor — a deterministic conclusion
+  is a floor, and here it is that "installed" must not be reported as "protected".
 - **Husky is the one case needing special handling.** Husky v9 sets `core.hooksPath=.husky/_`, and
   `.husky/_/pre-commit` is a *generated shim* that sources the user-editable `.husky/pre-commit`; writing to
   the shim would be undone the next time Husky runs. So a Husky repository is written to `.husky/pre-commit`
